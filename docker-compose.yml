@@ -6,15 +6,28 @@ services:
     ports:
       - "3100:3100"
     environment:
-      # Non-secret configuration only
+      # Non-secret configuration only — secrets loaded from mounted .env
       - MCP_TRANSPORT=sse
       - MCP_PORT=3100
       - DB_PATH=/data/data.db
     volumes:
-      # Secrets injected from 1Password (see scripts/setup-secrets.sh)
-      # Contains API keys, Discord token, and channel ID
+      # Secrets file (API keys, Discord token) — see scripts/setup-secrets.sh
       - /opt/market-sentinel/secrets.env:/app/.env:ro
       - sentinel-data:/data
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      # Node.js needs a writable /tmp for some operations
+      - /tmp:noexec,nosuid,size=64m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3100/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 30s

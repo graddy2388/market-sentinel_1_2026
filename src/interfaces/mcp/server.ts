@@ -16,6 +16,11 @@ import { watchlist, positions, alerts } from "../../state/schema.js";
 import { eq } from "drizzle-orm";
 import type { CandleInterval } from "../../data/types.js";
 
+// Input validation helpers
+const symbolSchema = z.string().min(1).max(10).regex(/^[A-Za-z]+$/, "Symbol must be letters only");
+const intervalSchema = z.enum(["1m", "5m", "15m", "1h", "4h", "1d"]).default("1h");
+const candlesSchema = z.number().int().min(1).max(500).default(100);
+
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: "market-sentinel",
@@ -25,7 +30,7 @@ function createMcpServer(): McpServer {
   server.tool(
     "get-price",
     "Get current price and 24h stats for a crypto symbol",
-    { symbol: z.string().describe("Crypto symbol, e.g. BTC, ETH, SOL") },
+    { symbol: symbolSchema.describe("Crypto symbol, e.g. BTC, ETH, SOL") },
     async ({ symbol }) => {
       const data = await fetch24hrCached(symbol);
       if (!data) {
@@ -53,9 +58,9 @@ function createMcpServer(): McpServer {
     "analyze-asset",
     "Run full technical + AI analysis on a crypto asset. Returns indicators, signals, and dual-model AI opinions with disagreement detection.",
     {
-      symbol: z.string().describe("Crypto symbol, e.g. BTC, ETH"),
-      interval: z.enum(["1m", "5m", "15m", "1h", "4h", "1d"]).default("1h").describe("Candle interval"),
-      candles: z.number().default(100).describe("Number of candles to analyze"),
+      symbol: symbolSchema.describe("Crypto symbol, e.g. BTC, ETH"),
+      interval: intervalSchema.describe("Candle interval"),
+      candles: candlesSchema.describe("Number of candles to analyze"),
     },
     async ({ symbol, interval, candles }) => {
       const klines = await fetchCandlesCached(symbol, interval as CandleInterval, candles);
@@ -98,9 +103,9 @@ function createMcpServer(): McpServer {
     "get-technical-signals",
     "Get raw technical indicator values and signal summary for a symbol",
     {
-      symbol: z.string().describe("Crypto symbol"),
-      interval: z.enum(["1m", "5m", "15m", "1h", "4h", "1d"]).default("1h"),
-      candles: z.number().default(100),
+      symbol: symbolSchema.describe("Crypto symbol"),
+      interval: intervalSchema,
+      candles: candlesSchema,
     },
     async ({ symbol, interval, candles }) => {
       const klines = await fetchCandlesCached(symbol, interval as CandleInterval, candles);
@@ -116,8 +121,8 @@ function createMcpServer(): McpServer {
     "critique-trade",
     "Get a blunt, honest critique of a proposed trade from both AI models. Will call out FOMO, poor risk management, etc.",
     {
-      description: z.string().describe("Description of the proposed trade, e.g. 'Buy 0.5 BTC at $67,000 because I think it will hit $100k'"),
-      symbol: z.string().optional().describe("Optional symbol for technical context"),
+      description: z.string().min(1).max(2000).describe("Description of the proposed trade, e.g. 'Buy 0.5 BTC at $67,000 because I think it will hit $100k'"),
+      symbol: symbolSchema.optional().describe("Optional symbol for technical context"),
     },
     async ({ description, symbol }) => {
       if (!hasAnyAI()) {
@@ -153,7 +158,7 @@ function createMcpServer(): McpServer {
     "Add, remove, or list symbols on the watchlist",
     {
       action: z.enum(["list", "add", "remove"]),
-      symbol: z.string().optional().describe("Symbol (required for add/remove)"),
+      symbol: symbolSchema.optional().describe("Symbol (required for add/remove)"),
       market: z.enum(["crypto", "stock", "commodity"]).default("crypto"),
     },
     async ({ action, symbol, market }) => {
@@ -184,10 +189,10 @@ function createMcpServer(): McpServer {
     "add-position",
     "Record a new portfolio position",
     {
-      symbol: z.string(),
-      quantity: z.number(),
-      entryPrice: z.number(),
-      notes: z.string().optional(),
+      symbol: symbolSchema,
+      quantity: z.number().positive().max(1e12),
+      entryPrice: z.number().positive().max(1e12),
+      notes: z.string().max(500).optional(),
     },
     async ({ symbol, quantity, entryPrice, notes }) => {
       const db = await getDb();
@@ -254,9 +259,9 @@ function createMcpServer(): McpServer {
     "set-alert",
     "Set a price alert for a symbol",
     {
-      symbol: z.string(),
+      symbol: symbolSchema,
       condition: z.enum(["price_above", "price_below", "pct_change", "rsi_above", "rsi_below"]),
-      threshold: z.number().describe("Price level, percentage, or RSI value"),
+      threshold: z.number().finite().describe("Price level, percentage, or RSI value"),
     },
     async ({ symbol, condition, threshold }) => {
       const db = await getDb();
@@ -297,10 +302,21 @@ async function startStdio() {
   await server.connect(transport);
 }
 
+const MAX_BODY_SIZE = 256 * 1024; // 256 KB — MCP messages are small JSON
+
 function parseJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString()));
@@ -311,6 +327,34 @@ function parseJsonBody(req: IncomingMessage): Promise<unknown> {
     req.on("error", reject);
   });
 }
+
+// --- Rate limiting (per-IP, in-memory) ---
+const RATE_LIMIT = 120;        // max requests per window
+const RATE_WINDOW_MS = 60_000; // 1-minute window
+const rateLimiter = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateLimiter.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimiter.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return true;
+  }
+  entry.count++;
+  return entry.count <= RATE_LIMIT;
+}
+
+// Clean up stale rate-limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimiter) {
+    if (now > entry.resetAt) rateLimiter.delete(ip);
+  }
+}, 5 * 60 * 1000).unref();
+
+// --- Session TTL (clean up abandoned MCP sessions) ---
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const sessionLastSeen = new Map<string, number>();
 
 async function startHttp() {
   // Start background poller with symbols from the DB watchlist
@@ -329,13 +373,38 @@ async function startHttp() {
 
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
+  // Periodic session cleanup
+  const sessionCleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [sid, lastSeen] of sessionLastSeen) {
+      if (now - lastSeen > SESSION_TTL_MS) {
+        const transport = transports.get(sid);
+        if (transport) {
+          transport.close().catch(() => {});
+          transports.delete(sid);
+        }
+        sessionLastSeen.delete(sid);
+        console.log(`[MCP] Expired stale session: ${sid}`);
+      }
+    }
+  }, 5 * 60 * 1000);
+  sessionCleanup.unref();
+
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://localhost:${MCP_PORT}`);
+
+    // --- Rate limiting ---
+    const clientIp = req.socket.remoteAddress ?? "unknown";
+    if (url.pathname !== "/health" && !checkRateLimit(clientIp)) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" });
+      res.end(JSON.stringify({ error: "Too many requests" }));
+      return;
+    }
 
     // --- Health endpoint (for Docker healthcheck) ---
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", uptime: process.uptime() }));
+      res.end(JSON.stringify({ status: "ok" }));
       return;
     }
 
@@ -353,6 +422,7 @@ async function startHttp() {
           if (sessionId && transports.has(sessionId)) {
             // Reuse existing session transport
             transport = transports.get(sessionId)!;
+            sessionLastSeen.set(sessionId, Date.now());
           } else if (!sessionId && isInitializeRequest(body)) {
             // New session — create a fresh server + transport pair
             transport = new StreamableHTTPServerTransport({
@@ -360,6 +430,7 @@ async function startHttp() {
               onsessioninitialized: (sid) => {
                 console.log(`[MCP] Session initialized: ${sid}`);
                 transports.set(sid, transport);
+                sessionLastSeen.set(sid, Date.now());
               },
             });
 
@@ -368,6 +439,7 @@ async function startHttp() {
               if (sid) {
                 console.log(`[MCP] Session closed: ${sid}`);
                 transports.delete(sid);
+                sessionLastSeen.delete(sid);
               }
             };
 
@@ -388,12 +460,15 @@ async function startHttp() {
 
           await transport.handleRequest(req, res, body);
         } catch (err) {
-          console.error("[MCP] POST error:", err);
+          const errMsg = err instanceof Error ? err.message : "Unknown error";
+          // Don't log full stack traces to avoid leaking internals
+          console.error(`[MCP] POST error: ${errMsg}`);
           if (!res.headersSent) {
-            res.writeHead(500, { "Content-Type": "application/json" });
+            const statusCode = errMsg === "Request body too large" ? 413 : 500;
+            res.writeHead(statusCode, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
               jsonrpc: "2.0",
-              error: { code: -32603, message: "Internal server error" },
+              error: { code: -32603, message: statusCode === 413 ? "Request body too large" : "Internal server error" },
               id: null,
             }));
           }
@@ -478,7 +553,9 @@ async function startHttp() {
         await transport.close();
       } catch { /* ignore */ }
       transports.delete(sid);
+      sessionLastSeen.delete(sid);
     }
+    clearInterval(sessionCleanup);
     httpServer.close();
     closeDb();
     process.exit(0);
