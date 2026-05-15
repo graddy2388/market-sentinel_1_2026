@@ -436,6 +436,7 @@ async function startHttp() {
     console.log(`[Market Sentinel] Health check: http://0.0.0.0:${MCP_PORT}/health`);
 
     // Start Discord bot + alert engine if configured
+    console.log(`[Market Sentinel] DISCORD_BOT_TOKEN present: ${!!process.env.DISCORD_BOT_TOKEN}, hasDiscord: ${hasDiscord()}`);
     if (hasDiscord()) {
       try {
         const { startDiscordBot, sendAlertNotification } = await import("../discord/bot.js");
