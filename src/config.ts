@@ -4,7 +4,8 @@ import { join } from "path";
 import { homedir } from "os";
 import { mkdirSync } from "fs";
 
-config({ override: true });
+// Load .env from CWD (default) or from a custom path via ENV_FILE
+config({ path: process.env.ENV_FILE || undefined, override: true });
 
 const configSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
