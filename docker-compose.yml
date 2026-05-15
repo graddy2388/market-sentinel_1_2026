@@ -1,6 +1,6 @@
 services:
   market-sentinel:
-    image: ghcr.io/graddy2388/market-sentinel:latest
+    image: ghcr.io/graddy2388/market-sentinel_1_2026:latest
     container_name: market-sentinel
     restart: unless-stopped
     ports:
