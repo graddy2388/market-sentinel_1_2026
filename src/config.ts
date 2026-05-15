@@ -9,6 +9,11 @@ config({ override: true });
 const configSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+  GROQ_API_KEY: z.string().optional(),
+  COHERE_API_KEY: z.string().optional(),
+  MISTRAL_API_KEY: z.string().optional(),
+  DEEPSEEK_API_KEY: z.string().optional(),
   FINNHUB_API_KEY: z.string().optional(),
   GOLDAPI_KEY: z.string().optional(),
   DISCORD_BOT_TOKEN: z.string().optional(),
@@ -42,8 +47,36 @@ export function hasClaude(): boolean {
   return !!appConfig.ANTHROPIC_API_KEY;
 }
 
+export function hasGemini(): boolean {
+  return !!appConfig.GEMINI_API_KEY;
+}
+
+export function hasGroq(): boolean {
+  return !!appConfig.GROQ_API_KEY;
+}
+
+export function hasCohere(): boolean {
+  return !!appConfig.COHERE_API_KEY;
+}
+
+export function hasMistral(): boolean {
+  return !!appConfig.MISTRAL_API_KEY;
+}
+
+export function hasDeepSeek(): boolean {
+  return !!appConfig.DEEPSEEK_API_KEY;
+}
+
 export function hasAnyAI(): boolean {
-  return hasOpenAI() || hasClaude();
+  return (
+    hasOpenAI() ||
+    hasClaude() ||
+    hasGemini() ||
+    hasGroq() ||
+    hasCohere() ||
+    hasMistral() ||
+    hasDeepSeek()
+  );
 }
 
 export function hasDiscord(): boolean {

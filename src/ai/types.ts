@@ -39,7 +39,36 @@ export interface DualAnalysisResult {
   consensus: string | null;
 }
 
+export interface ModelVote {
+  model: string;
+  analysis: AnalysisResponse;
+}
+
+export interface ModelCritique {
+  model: string;
+  critique: CritiqueResponse;
+}
+
 export interface ModelError {
-  model: "openai" | "claude";
+  model: string;
   error: string;
+}
+
+export interface CouncilAnalysisResult {
+  symbol: string;
+  timestamp: number;
+  votes: ModelVote[];
+  failed: ModelError[];
+  majorityDirection: "bullish" | "bearish" | "neutral";
+  directionBreakdown: { bullish: number; bearish: number; neutral: number };
+  avgConfidence: number;
+  disagreements: string[];
+  consensus: string | null;
+}
+
+export interface CouncilCritiqueResult {
+  opinions: ModelCritique[];
+  failed: ModelError[];
+  avgScore: number;
+  majorityAssessment: "good" | "risky" | "bad";
 }

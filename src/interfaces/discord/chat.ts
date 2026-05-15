@@ -1,10 +1,10 @@
 import { fetch24hrCached, fetchCandlesCached, getSupportedSymbols } from "../../data/coingecko.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
-import { dualAnalyze, dualCritique } from "../../ai/dual-analyst.js";
+import { councilAnalyze, councilCritique } from "../../ai/council.js";
 import { chatWithClaude, chatWithClaudeVision } from "../../ai/claude.js";
 import { chatWithOpenAI, chatWithOpenAIVision } from "../../ai/openai.js";
 import { hasClaude, hasOpenAI, hasAnyAI } from "../../config.js";
-import type { DualAnalysisResult, CritiqueResponse } from "../../ai/types.js";
+import type { CouncilAnalysisResult, CouncilCritiqueResult } from "../../ai/types.js";
 import type { TechnicalSummary } from "../../analysis/types.js";
 
 const DISCORD_CHAR_LIMIT = 2000;
@@ -36,69 +36,99 @@ function isTradeProposal(text: string): boolean {
   return patterns.some((p) => p.test(text));
 }
 
-function formatDualAnalysis(result: DualAnalysisResult, question: string): string {
+function formatCouncilAnalysis(result: CouncilAnalysisResult): string {
   const parts: string[] = [];
 
   if (result.consensus) {
-    parts.push(`**Consensus:** ${result.consensus}`);
+    parts.push(`**Council Verdict:** ${result.consensus}`);
   }
 
-  if (result.openai) {
-    const o = result.openai;
-    parts.push(
-      `**OpenAI:** ${o.direction} (${(o.confidence * 100).toFixed(0)}%) — ${o.reasoning}`
-    );
-    if (o.actionSuggestion) parts.push(`> ${o.actionSuggestion}`);
+  if (result.votes.length <= 3) {
+    // Detailed format for small council
+    for (const vote of result.votes) {
+      const v = vote.analysis;
+      parts.push(
+        `**${vote.model}:** ${v.direction} (${(v.confidence * 100).toFixed(0)}%) — ${v.reasoning}`
+      );
+      if (v.actionSuggestion) parts.push(`> ${v.actionSuggestion}`);
+    }
+  } else {
+    // Compact format for full council
+    for (const vote of result.votes) {
+      const v = vote.analysis;
+      const tag = v.direction === "bullish" ? "BULL" : v.direction === "bearish" ? "BEAR" : "HOLD";
+      // Truncate reasoning to keep within Discord limits
+      const shortReason = v.reasoning.length > 80 ? v.reasoning.slice(0, 77) + "..." : v.reasoning;
+      parts.push(`**${vote.model}:** ${tag} ${(v.confidence * 100).toFixed(0)}% — ${shortReason}`);
+    }
+
+    // Show top suggestion from the highest-confidence model
+    const top = [...result.votes].sort((a, b) => b.analysis.confidence - a.analysis.confidence)[0];
+    if (top?.analysis.actionSuggestion) {
+      parts.push(`\n**Recommendation (${top.model}):** ${top.analysis.actionSuggestion}`);
+    }
   }
 
-  if (result.claude) {
-    const c = result.claude;
-    parts.push(
-      `**Claude:** ${c.direction} (${(c.confidence * 100).toFixed(0)}%) — ${c.reasoning}`
-    );
-    if (c.actionSuggestion) parts.push(`> ${c.actionSuggestion}`);
+  if (result.failed.length > 0) {
+    parts.push(`*Failed:* ${result.failed.map((f) => f.model).join(", ")}`);
   }
 
   if (result.disagreements.length > 0) {
     parts.push(`\n**Disagreements:**\n${result.disagreements.map((d) => `- ${d}`).join("\n")}`);
   }
 
-  if (!result.openai && !result.claude) {
-    parts.push("Both AI models failed to respond. Try again later.");
+  if (result.votes.length === 0) {
+    parts.push("All AI models failed to respond. Try again later.");
   }
 
   return parts.join("\n");
 }
 
-function formatCritique(
-  critique: { openai: CritiqueResponse | null; claude: CritiqueResponse | null }
-): string {
+function formatCouncilCritique(result: CouncilCritiqueResult): string {
   const parts: string[] = [];
 
-  if (critique.openai) {
-    const o = critique.openai;
-    parts.push(
-      `**OpenAI:** ${o.overallAssessment.toUpperCase()} (${o.score}/10) — ${o.recommendation}`
-    );
-    if (o.issues.length > 0) {
-      const top = o.issues.slice(0, 3);
-      parts.push(top.map((i) => `> [${i.severity}] ${i.description}`).join("\n"));
+  // Overall verdict
+  const tag = result.majorityAssessment.toUpperCase();
+  parts.push(`**Council Verdict:** ${tag} (avg score ${result.avgScore.toFixed(1)}/10)`);
+
+  if (result.opinions.length <= 3) {
+    // Detailed format
+    for (const o of result.opinions) {
+      const c = o.critique;
+      parts.push(
+        `**${o.model}:** ${c.overallAssessment.toUpperCase()} (${c.score}/10) — ${c.recommendation}`
+      );
+      if (c.issues.length > 0) {
+        const top = c.issues.slice(0, 3);
+        parts.push(top.map((i) => `> [${i.severity}] ${i.description}`).join("\n"));
+      }
+    }
+  } else {
+    // Compact format
+    for (const o of result.opinions) {
+      const c = o.critique;
+      const shortRec = c.recommendation.length > 80 ? c.recommendation.slice(0, 77) + "..." : c.recommendation;
+      parts.push(`**${o.model}:** ${c.overallAssessment.toUpperCase()} ${c.score}/10 — ${shortRec}`);
+    }
+
+    // Aggregate top issues from all models
+    const allIssues = result.opinions
+      .flatMap((o) => o.critique.issues.filter((i) => i.severity === "critical" || i.severity === "high"))
+      .slice(0, 5);
+    if (allIssues.length > 0) {
+      parts.push(`\n**Key Issues:**`);
+      for (const issue of allIssues) {
+        parts.push(`> [${issue.severity}] ${issue.description}`);
+      }
     }
   }
 
-  if (critique.claude) {
-    const c = critique.claude;
-    parts.push(
-      `**Claude:** ${c.overallAssessment.toUpperCase()} (${c.score}/10) — ${c.recommendation}`
-    );
-    if (c.issues.length > 0) {
-      const top = c.issues.slice(0, 3);
-      parts.push(top.map((i) => `> [${i.severity}] ${i.description}`).join("\n"));
-    }
+  if (result.failed.length > 0) {
+    parts.push(`*Failed:* ${result.failed.map((f) => f.model).join(", ")}`);
   }
 
-  if (!critique.openai && !critique.claude) {
-    parts.push("Both AI models failed to respond. Try again later.");
+  if (result.opinions.length === 0) {
+    parts.push("All AI models failed to respond. Try again later.");
   }
 
   return parts.join("\n");
@@ -130,13 +160,13 @@ async function handleSymbolQuestion(
     : `${symbol} — price data unavailable`;
 
   if (isTradeProposal(question) && technicals) {
-    const critique = await dualCritique(question, technicals);
-    return `**${priceInfo}**\n\n${formatCritique(critique)}`;
+    const critique = await councilCritique(question, technicals);
+    return `**${priceInfo}**\n\n${formatCouncilCritique(critique)}`;
   }
 
   if (technicals) {
-    const analysis = await dualAnalyze(symbol, technicals);
-    return `**${priceInfo}**\n\n${formatDualAnalysis(analysis, question)}`;
+    const analysis = await councilAnalyze(symbol, technicals);
+    return `**${priceInfo}**\n\n${formatCouncilAnalysis(analysis)}`;
   }
 
   // Not enough candle data for full analysis — fall back to simple AI chat with price context

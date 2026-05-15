@@ -9,7 +9,7 @@ import { z } from "zod";
 import { fetch24hrCached, fetchCandlesCached } from "../../data/coingecko.js";
 import { startPoller, stopPoller } from "../../data/poller.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
-import { dualAnalyze, dualCritique } from "../../ai/dual-analyst.js";
+import { councilAnalyze, councilCritique } from "../../ai/council.js";
 import { hasAnyAI, hasDiscord } from "../../config.js";
 import { getDb, saveDb, closeDb } from "../../state/db.js";
 import { watchlist, positions, alerts } from "../../state/schema.js";
@@ -78,12 +78,15 @@ function createMcpServer(): McpServer {
       };
 
       if (hasAnyAI()) {
-        const aiResult = await dualAnalyze(symbol.toUpperCase(), technicals);
+        const council = await councilAnalyze(symbol.toUpperCase(), technicals);
         result.ai = {
-          openai: aiResult.openai,
-          claude: aiResult.claude,
-          disagreements: aiResult.disagreements,
-          consensus: aiResult.consensus,
+          majorityDirection: council.majorityDirection,
+          directionBreakdown: council.directionBreakdown,
+          avgConfidence: council.avgConfidence,
+          consensus: council.consensus,
+          votes: council.votes,
+          disagreements: council.disagreements,
+          failed: council.failed,
         };
       }
 
@@ -129,14 +132,16 @@ function createMcpServer(): McpServer {
         }
       }
 
-      const result = await dualCritique(description, technicals);
+      const council = await councilCritique(description, technicals);
       return {
         content: [{
           type: "text" as const,
           text: JSON.stringify({
             trade: description,
-            openai: result.openai,
-            claude: result.claude,
+            majorityAssessment: council.majorityAssessment,
+            avgScore: council.avgScore,
+            opinions: council.opinions,
+            failed: council.failed,
           }, null, 2),
         }],
       };
@@ -436,7 +441,6 @@ async function startHttp() {
     console.log(`[Market Sentinel] Health check: http://0.0.0.0:${MCP_PORT}/health`);
 
     // Start Discord bot + alert engine if configured
-    console.log(`[Market Sentinel] DISCORD_BOT_TOKEN present: ${!!process.env.DISCORD_BOT_TOKEN}, hasDiscord: ${hasDiscord()}`);
     if (hasDiscord()) {
       try {
         const { startDiscordBot, sendAlertNotification } = await import("../discord/bot.js");

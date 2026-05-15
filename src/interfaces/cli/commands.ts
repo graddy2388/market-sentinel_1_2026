@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { fetch24hr, fetchCandles } from "../../data/coingecko.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
-import { dualAnalyze, dualCritique } from "../../ai/dual-analyst.js";
+import { councilAnalyze, councilCritique } from "../../ai/council.js";
 import { hasAnyAI, requireAI } from "../../config.js";
 import { getDb, saveDb } from "../../state/db.js";
 import { watchlist, positions } from "../../state/schema.js";
@@ -101,15 +101,20 @@ export function registerCommands(program: Command): void {
       }
 
       if (hasAnyAI()) {
-        console.log(`\n=== AI Analysis ===`);
+        console.log(`\n=== AI Council ===`);
         console.log("  Querying AI models...");
-        const result = await dualAnalyze(symbol.toUpperCase(), technicals);
+        const result = await councilAnalyze(symbol.toUpperCase(), technicals);
 
-        if (result.openai) console.log(formatAnalysis("OpenAI", result.openai));
-        if (result.claude) console.log(formatAnalysis("Claude", result.claude));
+        for (const vote of result.votes) {
+          console.log(formatAnalysis(vote.model, vote.analysis));
+        }
+
+        if (result.failed.length > 0) {
+          console.log(`\n  Failed: ${result.failed.map((f) => `${f.model} (${f.error})`).join(", ")}`);
+        }
 
         if (result.consensus) {
-          console.log(`\n  Consensus: ${result.consensus}`);
+          console.log(`\n  Council Verdict: ${result.consensus}`);
         }
 
         if (result.disagreements.length > 0) {
@@ -143,10 +148,17 @@ export function registerCommands(program: Command): void {
       console.log(`  Proposed: ${description}`);
       console.log("  Querying AI models...\n");
 
-      const result = await dualCritique(description, technicals);
+      const result = await councilCritique(description, technicals);
 
-      if (result.openai) console.log(formatCritique("OpenAI", result.openai));
-      if (result.claude) console.log(formatCritique("Claude", result.claude));
+      for (const opinion of result.opinions) {
+        console.log(formatCritique(opinion.model, opinion.critique));
+      }
+
+      if (result.failed.length > 0) {
+        console.log(`\n  Failed: ${result.failed.map((f) => `${f.model} (${f.error})`).join(", ")}`);
+      }
+
+      console.log(`\n  Council Verdict: ${result.majorityAssessment.toUpperCase()} (avg score ${result.avgScore.toFixed(1)}/10)`);
     });
 
   program
