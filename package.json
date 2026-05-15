@@ -1,0 +1,40 @@
+{
+  "name": "market-sentinel",
+  "version": "0.1.0",
+  "description": "AI-powered trading advisor agent with dual-model analysis",
+  "type": "module",
+  "bin": {
+    "market-sentinel": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "mcp": "tsx src/interfaces/mcp/server.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "sql.js": "^1.12.0",
+    "commander": "^13.1.0",
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.5.0",
+    "drizzle-orm": "^0.44.1",
+    "openai": "^4.86.2",
+    "trading-signals": "^6.1.0",
+    "ws": "^8.18.2",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/sql.js": "^1.4.9",
+    "@types/node": "^22.15.0",
+    "@types/ws": "^8.18.1",
+    "drizzle-kit": "^0.31.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.3"
+  }
+}
