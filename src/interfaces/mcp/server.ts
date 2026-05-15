@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { fetch24hr, fetchCandles } from "../../data/coingecko.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
@@ -272,9 +276,168 @@ server.tool(
   }
 );
 
-async function main() {
+// --- Transport selection ---
+
+const MCP_TRANSPORT = process.env.MCP_TRANSPORT ?? "stdio";
+const MCP_PORT = parseInt(process.env.MCP_PORT ?? "3100", 10);
+
+async function startStdio() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+function parseJsonBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString()));
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+async function startHttp() {
+  const transports = new Map<string, StreamableHTTPServerTransport>();
+
+  const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url ?? "/", `http://localhost:${MCP_PORT}`);
+
+    // --- Health endpoint (for Docker healthcheck) ---
+    if (url.pathname === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime: process.uptime() }));
+      return;
+    }
+
+    // --- MCP endpoint ---
+    if (url.pathname === "/mcp") {
+      const method = req.method?.toUpperCase();
+
+      if (method === "POST") {
+        try {
+          const body = await parseJsonBody(req);
+          const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+          let transport: StreamableHTTPServerTransport;
+
+          if (sessionId && transports.has(sessionId)) {
+            // Reuse existing session transport
+            transport = transports.get(sessionId)!;
+          } else if (!sessionId && isInitializeRequest(body)) {
+            // New session — create transport
+            transport = new StreamableHTTPServerTransport({
+              sessionIdGenerator: () => randomUUID(),
+              onsessioninitialized: (sid) => {
+                console.log(`[MCP] Session initialized: ${sid}`);
+                transports.set(sid, transport);
+              },
+            });
+
+            transport.onclose = () => {
+              const sid = transport.sessionId;
+              if (sid) {
+                console.log(`[MCP] Session closed: ${sid}`);
+                transports.delete(sid);
+              }
+            };
+
+            // Connect the MCP server to this transport BEFORE handling the request
+            await server.connect(transport);
+            await transport.handleRequest(req, res, body);
+            return;
+          } else {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32000, message: "Bad Request: No valid session ID" },
+              id: null,
+            }));
+            return;
+          }
+
+          await transport.handleRequest(req, res, body);
+        } catch (err) {
+          console.error("[MCP] POST error:", err);
+          if (!res.headersSent) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32603, message: "Internal server error" },
+              id: null,
+            }));
+          }
+        }
+        return;
+      }
+
+      if (method === "GET") {
+        // SSE stream for notifications
+        const sessionId = req.headers["mcp-session-id"] as string | undefined;
+        if (!sessionId || !transports.has(sessionId)) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("Invalid or missing session ID");
+          return;
+        }
+        await transports.get(sessionId)!.handleRequest(req, res);
+        return;
+      }
+
+      if (method === "DELETE") {
+        // Session termination
+        const sessionId = req.headers["mcp-session-id"] as string | undefined;
+        if (!sessionId || !transports.has(sessionId)) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("Invalid or missing session ID");
+          return;
+        }
+        await transports.get(sessionId)!.handleRequest(req, res);
+        return;
+      }
+
+      // Method not allowed
+      res.writeHead(405, { "Content-Type": "text/plain" });
+      res.end("Method Not Allowed");
+      return;
+    }
+
+    // --- 404 ---
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not Found");
+  });
+
+  httpServer.listen(MCP_PORT, "0.0.0.0", () => {
+    console.log(`[Market Sentinel] MCP StreamableHTTP server listening on http://0.0.0.0:${MCP_PORT}/mcp`);
+    console.log(`[Market Sentinel] Health check: http://0.0.0.0:${MCP_PORT}/health`);
+  });
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.log("[Market Sentinel] Shutting down...");
+    for (const [sid, transport] of transports) {
+      try {
+        await transport.close();
+      } catch { /* ignore */ }
+      transports.delete(sid);
+    }
+    httpServer.close();
+    closeDb();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+async function main() {
+  if (MCP_TRANSPORT === "sse" || MCP_TRANSPORT === "http" || MCP_TRANSPORT === "streamable-http") {
+    await startHttp();
+  } else {
+    await startStdio();
+  }
 }
 
 main().catch((err) => {
