@@ -6,10 +6,11 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { fetch24hr, fetchCandles } from "../../data/coingecko.js";
+import { fetch24hrCached, fetchCandlesCached } from "../../data/coingecko.js";
+import { startPoller, stopPoller } from "../../data/poller.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { dualAnalyze, dualCritique } from "../../ai/dual-analyst.js";
-import { hasAnyAI } from "../../config.js";
+import { hasAnyAI, hasDiscord } from "../../config.js";
 import { getDb, saveDb, closeDb } from "../../state/db.js";
 import { watchlist, positions, alerts } from "../../state/schema.js";
 import { eq } from "drizzle-orm";
@@ -26,7 +27,7 @@ function createMcpServer(): McpServer {
     "Get current price and 24h stats for a crypto symbol",
     { symbol: z.string().describe("Crypto symbol, e.g. BTC, ETH, SOL") },
     async ({ symbol }) => {
-      const data = await fetch24hr(symbol);
+      const data = await fetch24hrCached(symbol);
       if (!data) {
         return { content: [{ type: "text" as const, text: `Could not fetch data for ${symbol.toUpperCase()}` }] };
       }
@@ -57,7 +58,7 @@ function createMcpServer(): McpServer {
       candles: z.number().default(100).describe("Number of candles to analyze"),
     },
     async ({ symbol, interval, candles }) => {
-      const klines = await fetchCandles(symbol, interval as CandleInterval, candles);
+      const klines = await fetchCandlesCached(symbol, interval as CandleInterval, candles);
       if (klines.length < 14) {
         return { content: [{ type: "text" as const, text: `Not enough data for ${symbol.toUpperCase()}. Got ${klines.length} candles, need at least 14.` }] };
       }
@@ -99,7 +100,7 @@ function createMcpServer(): McpServer {
       candles: z.number().default(100),
     },
     async ({ symbol, interval, candles }) => {
-      const klines = await fetchCandles(symbol, interval as CandleInterval, candles);
+      const klines = await fetchCandlesCached(symbol, interval as CandleInterval, candles);
       const technicals = analyzeTechnicals(symbol.toUpperCase(), klines);
       if (!technicals) {
         return { content: [{ type: "text" as const, text: "Not enough data for analysis." }] };
@@ -122,7 +123,7 @@ function createMcpServer(): McpServer {
 
       let technicals = null;
       if (symbol) {
-        const klines = await fetchCandles(symbol, "1h", 100);
+        const klines = await fetchCandlesCached(symbol, "1h", 100);
         if (klines.length >= 14) {
           technicals = analyzeTechnicals(symbol.toUpperCase(), klines);
         }
@@ -212,7 +213,7 @@ function createMcpServer(): McpServer {
 
       const portfolio = await Promise.all(
         items.map(async (pos) => {
-          const data = await fetch24hr(pos.symbol);
+          const data = await fetch24hrCached(pos.symbol);
           const currentPrice = data?.price ?? 0;
           const pnl = currentPrice > 0
             ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
@@ -307,6 +308,20 @@ function parseJsonBody(req: IncomingMessage): Promise<unknown> {
 }
 
 async function startHttp() {
+  // Start background poller with symbols from the DB watchlist
+  try {
+    const db = await getDb();
+    const items = db.select().from(watchlist).all();
+    const symbols = items.map((row) => row.symbol);
+    if (symbols.length > 0) {
+      startPoller(symbols);
+    } else {
+      console.log("[Market Sentinel] Watchlist is empty — poller not started. Add symbols via manage-watchlist.");
+    }
+  } catch (err) {
+    console.warn("[Market Sentinel] Could not read watchlist for poller:", err);
+  }
+
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -416,14 +431,43 @@ async function startHttp() {
     res.end("Not Found");
   });
 
-  httpServer.listen(MCP_PORT, "0.0.0.0", () => {
+  httpServer.listen(MCP_PORT, "0.0.0.0", async () => {
     console.log(`[Market Sentinel] MCP StreamableHTTP server listening on http://0.0.0.0:${MCP_PORT}/mcp`);
     console.log(`[Market Sentinel] Health check: http://0.0.0.0:${MCP_PORT}/health`);
+
+    // Start Discord bot + alert engine if configured
+    if (hasDiscord()) {
+      try {
+        const { startDiscordBot, sendAlertNotification } = await import("../discord/bot.js");
+        const { startAlertEngine } = await import("../../alerts/engine.js");
+
+        await startDiscordBot();
+        startAlertEngine((alert, currentPrice) => {
+          sendAlertNotification(alert, currentPrice).catch((err) =>
+            console.error("[Market Sentinel] Alert notification error:", err)
+          );
+        });
+        console.log("[Market Sentinel] Discord bot and alert engine started");
+      } catch (err) {
+        console.error("[Market Sentinel] Failed to start Discord/alert engine:", err);
+      }
+    }
   });
 
   // Graceful shutdown
   const shutdown = async () => {
     console.log("[Market Sentinel] Shutting down...");
+    stopPoller();
+
+    if (hasDiscord()) {
+      try {
+        const { stopDiscordBot } = await import("../discord/bot.js");
+        const { stopAlertEngine } = await import("../../alerts/engine.js");
+        stopAlertEngine();
+        await stopDiscordBot();
+      } catch { /* ignore */ }
+    }
+
     for (const [sid, transport] of transports) {
       try {
         await transport.close();

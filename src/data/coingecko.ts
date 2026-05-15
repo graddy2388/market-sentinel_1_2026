@@ -1,4 +1,5 @@
 import type { Tick, Candle, CandleInterval, MarketOverview } from "./types.js";
+import { cache } from "./cache.js";
 
 const BASE_URL = "https://api.coingecko.com/api/v3";
 
@@ -126,4 +127,45 @@ export async function fetchCandles(
 
 export function getSupportedSymbols(): string[] {
   return Object.keys(SYMBOL_TO_ID);
+}
+
+// --- Cached wrappers ---
+
+/**
+ * Returns 24h market data for a symbol, serving from the in-memory
+ * cache when available (TTL 15 s) and falling back to a fresh fetch.
+ */
+export async function fetch24hrCached(
+  symbol: string
+): Promise<MarketOverview | null> {
+  const cached = cache.getPrice(symbol);
+  if (cached) return cached;
+
+  const data = await fetch24hr(symbol);
+  if (data) {
+    cache.setPrice(symbol, data);
+  }
+  return data;
+}
+
+/**
+ * Returns OHLC candle data for a symbol, serving from the in-memory
+ * cache when available (TTL 60 s) and falling back to a fresh fetch.
+ */
+export async function fetchCandlesCached(
+  symbol: string,
+  interval: CandleInterval = "1h",
+  limit = 100
+): Promise<Candle[]> {
+  const cached = cache.getCandles(symbol, interval);
+  if (cached) {
+    // Respect the caller's limit even when serving from cache
+    return cached.slice(-limit);
+  }
+
+  const data = await fetchCandles(symbol, interval, limit);
+  if (data.length > 0) {
+    cache.setCandles(symbol, interval, data);
+  }
+  return data;
 }

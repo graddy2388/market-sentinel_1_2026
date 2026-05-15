@@ -46,6 +46,10 @@ export function hasAnyAI(): boolean {
   return hasOpenAI() || hasClaude();
 }
 
+export function hasDiscord(): boolean {
+  return !!appConfig.DISCORD_BOT_TOKEN;
+}
+
 export function requireAI(): void {
   if (!hasAnyAI()) {
     console.error(
