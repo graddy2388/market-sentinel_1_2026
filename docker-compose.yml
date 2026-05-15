@@ -5,12 +5,12 @@ services:
     restart: unless-stopped
     ports:
       - "3100:3100"
-    env_file:
-      - .env
     environment:
       - MCP_TRANSPORT=sse
       - MCP_PORT=3100
       - DB_PATH=/data/data.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
       - sentinel-data:/data
     healthcheck:
