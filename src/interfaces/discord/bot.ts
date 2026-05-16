@@ -98,13 +98,15 @@ export async function startDiscordBot(): Promise<Client> {
         a.contentType?.startsWith("image/")
       );
 
-      let response: string;
       if (imageAttachment) {
-        response = await handleImageMessage(question, imageAttachment.url);
+        const response = await handleImageMessage(question, imageAttachment.url);
+        await message.reply(response);
       } else {
-        response = await handleChatMessage(question);
+        const responses = await handleChatMessage(question);
+        for (const response of responses) {
+          await message.reply(response);
+        }
       }
-      await message.reply(response);
     } catch (err) {
       console.error("[Discord] Chat message error:", err);
       try {
