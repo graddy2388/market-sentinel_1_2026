@@ -1,6 +1,6 @@
 import { config } from "dotenv";
 import { z } from "zod";
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
 import { mkdirSync } from "fs";
 
@@ -35,10 +35,17 @@ if (!parsed.success) {
 
 export const appConfig = parsed.data;
 
-export const DATA_DIR = join(homedir(), ".market-sentinel");
-export const DB_PATH = join(DATA_DIR, "data.db");
+// DB_PATH from env (Docker: /data/data.db) or fallback to ~/.market-sentinel/data.db
+const envDbPath = process.env.DB_PATH;
+export const DB_PATH = envDbPath || join(homedir(), ".market-sentinel", "data.db");
+export const DATA_DIR = dirname(DB_PATH);
 
-mkdirSync(DATA_DIR, { recursive: true });
+// Ensure data directory exists (skip if read-only filesystem)
+try {
+  mkdirSync(DATA_DIR, { recursive: true });
+} catch {
+  // Directory may already exist or filesystem is read-only (Docker)
+}
 
 export function hasOpenAI(): boolean {
   return !!appConfig.OPENAI_API_KEY;
