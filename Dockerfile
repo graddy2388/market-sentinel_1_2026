@@ -32,6 +32,7 @@ RUN mkdir -p /data && chown appuser:appgroup /data
 
 ENV NODE_ENV=production
 ENV DB_PATH=/data/data.db
+ENV MCP_HOST=0.0.0.0
 
 EXPOSE 3100
 

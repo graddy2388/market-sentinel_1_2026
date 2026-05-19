@@ -1,11 +1,20 @@
 import { Command } from "commander";
-import { fetch24hr, fetchCandles } from "../../data/coingecko.js";
+import { fetch24hr, fetchCandles } from "../../data/providers.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
 import { hasAnyAI, requireAI } from "../../config.js";
 import { getDb, saveDb } from "../../state/db.js";
 import { watchlist, positions } from "../../state/schema.js";
 import { eq } from "drizzle-orm";
+import {
+  symbolSchema,
+  intervalSchema,
+  candlesSchema,
+  marketSchema,
+  quantitySchema,
+  priceSchema,
+  notesSchema,
+} from "../../validation.js";
 import type { AnalysisResponse, CritiqueResponse } from "../../ai/types.js";
 
 function formatAnalysis(label: string, analysis: AnalysisResponse): string {
@@ -39,13 +48,19 @@ export function registerCommands(program: Command): void {
     .command("price <symbol>")
     .description("Get current price and 24h stats for a crypto symbol")
     .action(async (symbol: string) => {
-      const data = await fetch24hr(symbol);
+      const symResult = symbolSchema.safeParse(symbol);
+      if (!symResult.success) {
+        console.error(`Invalid symbol: ${symResult.error.issues[0].message}`);
+        return;
+      }
+      const sym = symResult.data;
+      const data = await fetch24hr(sym);
       if (!data) {
-        console.error(`Could not fetch data for ${symbol.toUpperCase()}`);
+        console.error(`Could not fetch data for ${sym}`);
         return;
       }
       console.log(`
-  ${symbol.toUpperCase()}/USD
+  ${sym}/USD
   Price:     $${data.price.toFixed(2)}
   24h Change: ${data.change24h >= 0 ? "+" : ""}${data.change24h.toFixed(2)} (${data.changePercent24h >= 0 ? "+" : ""}${data.changePercent24h.toFixed(2)}%)
   24h High:   $${data.high24h.toFixed(2)}
@@ -60,26 +75,42 @@ export function registerCommands(program: Command): void {
     .option("-c, --candles <number>", "Number of candles to analyze", "100")
     .option("-i, --interval <interval>", "Candle interval", "1h")
     .action(async (symbol: string, opts: { candles: string; interval: string }) => {
-      console.log(`Fetching ${opts.candles} ${opts.interval} candles for ${symbol.toUpperCase()}...`);
-
-      const candles = await fetchCandles(
-        symbol,
-        opts.interval as "1h",
-        parseInt(opts.candles)
-      );
-
-      if (candles.length === 0) {
-        console.error(`No candle data found for ${symbol.toUpperCase()}`);
+      const symResult = symbolSchema.safeParse(symbol);
+      if (!symResult.success) {
+        console.error(`Invalid symbol: ${symResult.error.issues[0].message}`);
+        return;
+      }
+      const intResult = intervalSchema.safeParse(opts.interval);
+      if (!intResult.success) {
+        console.error(`Invalid interval: must be one of 1m, 5m, 15m, 1h, 4h, 1d`);
+        return;
+      }
+      const candleResult = candlesSchema.safeParse(opts.candles);
+      if (!candleResult.success) {
+        console.error(`Invalid candles: ${candleResult.error.issues[0].message}`);
         return;
       }
 
-      const technicals = analyzeTechnicals(symbol.toUpperCase(), candles);
+      const sym = symResult.data;
+      const interval = intResult.data;
+      const candleCount = candleResult.data;
+
+      console.log(`Fetching ${candleCount} ${interval} candles for ${sym}...`);
+
+      const candles = await fetchCandles(sym, interval, candleCount);
+
+      if (candles.length === 0) {
+        console.error(`No candle data found for ${sym}`);
+        return;
+      }
+
+      const technicals = analyzeTechnicals(sym, candles);
       if (!technicals) {
         console.error("Not enough data for technical analysis");
         return;
       }
 
-      console.log(`\n=== Technical Analysis: ${symbol.toUpperCase()} ===`);
+      console.log(`\n=== Technical Analysis: ${sym} ===`);
       console.log(`  Price: $${technicals.price.toFixed(2)}`);
       console.log(`  Overall: ${technicals.overallDirection.toUpperCase()} (strength: ${(technicals.overallStrength * 100).toFixed(0)}%)`);
 
@@ -103,7 +134,7 @@ export function registerCommands(program: Command): void {
       if (hasAnyAI()) {
         console.log(`\n=== AI Council ===`);
         console.log("  Querying AI models...");
-        const result = await councilAnalyze(symbol.toUpperCase(), technicals);
+        const result = await councilAnalyze(sym, technicals);
 
         for (const vote of result.votes) {
           console.log(formatAnalysis(vote.model, vote.analysis));
@@ -138,9 +169,14 @@ export function registerCommands(program: Command): void {
 
       let technicals = null;
       if (opts.symbol) {
-        const candles = await fetchCandles(opts.symbol, "1h", 100);
+        const symResult = symbolSchema.safeParse(opts.symbol);
+        if (!symResult.success) {
+          console.error(`Invalid symbol: ${symResult.error.issues[0].message}`);
+          return;
+        }
+        const candles = await fetchCandles(symResult.data, "1h", 100);
         if (candles.length >= 14) {
-          technicals = analyzeTechnicals(opts.symbol.toUpperCase(), candles);
+          technicals = analyzeTechnicals(symResult.data, candles);
         }
       }
 
@@ -182,27 +218,43 @@ export function registerCommands(program: Command): void {
     .description("Add a symbol to the watchlist")
     .option("-m, --market <market>", "Market type (crypto, stock, commodity)", "crypto")
     .action(async (symbol: string, opts: { market: string }) => {
+      const symResult = symbolSchema.safeParse(symbol);
+      if (!symResult.success) {
+        console.error(`Invalid symbol: ${symResult.error.issues[0].message}`);
+        return;
+      }
+      const marketResult = marketSchema.safeParse(opts.market);
+      if (!marketResult.success) {
+        console.error(`Invalid market: must be one of crypto, stock, commodity`);
+        return;
+      }
+
       const db = await getDb();
       db.insert(watchlist)
         .values({
-          symbol: symbol.toUpperCase(),
-          market: opts.market as "crypto" | "stock" | "commodity",
+          symbol: symResult.data,
+          market: marketResult.data,
         })
         .run();
       saveDb();
-      console.log(`  Added ${symbol.toUpperCase()} (${opts.market}) to watchlist.`);
+      console.log(`  Added ${symResult.data} (${marketResult.data}) to watchlist.`);
     });
 
   program
     .command("watch-remove <symbol>")
     .description("Remove a symbol from the watchlist")
     .action(async (symbol: string) => {
+      const symResult = symbolSchema.safeParse(symbol);
+      if (!symResult.success) {
+        console.error(`Invalid symbol: ${symResult.error.issues[0].message}`);
+        return;
+      }
       const db = await getDb();
       db.delete(watchlist)
-        .where(eq(watchlist.symbol, symbol.toUpperCase()))
+        .where(eq(watchlist.symbol, symResult.data))
         .run();
       saveDb();
-      console.log(`  Removed ${symbol.toUpperCase()} from watchlist.`);
+      console.log(`  Removed ${symResult.data} from watchlist.`);
     });
 
   program
@@ -229,16 +281,37 @@ export function registerCommands(program: Command): void {
     .description("Add a position to portfolio")
     .option("-n, --notes <notes>", "Trade notes")
     .action(async (symbol: string, quantity: string, entryPrice: string, opts: { notes?: string }) => {
+      const symResult = symbolSchema.safeParse(symbol);
+      if (!symResult.success) {
+        console.error(`Invalid symbol: ${symResult.error.issues[0].message}`);
+        return;
+      }
+      const qtyResult = quantitySchema.safeParse(quantity);
+      if (!qtyResult.success) {
+        console.error(`Invalid quantity: ${qtyResult.error.issues[0].message}`);
+        return;
+      }
+      const priceResult = priceSchema.safeParse(entryPrice);
+      if (!priceResult.success) {
+        console.error(`Invalid entry price: ${priceResult.error.issues[0].message}`);
+        return;
+      }
+      const notesResult = notesSchema.safeParse(opts.notes);
+      if (!notesResult.success) {
+        console.error(`Invalid notes: ${notesResult.error.issues[0].message}`);
+        return;
+      }
+
       const db = await getDb();
       db.insert(positions)
         .values({
-          symbol: symbol.toUpperCase(),
-          quantity: parseFloat(quantity),
-          entryPrice: parseFloat(entryPrice),
-          notes: opts.notes ?? null,
+          symbol: symResult.data,
+          quantity: qtyResult.data,
+          entryPrice: priceResult.data,
+          notes: notesResult.data ?? null,
         })
         .run();
       saveDb();
-      console.log(`  Added position: ${symbol.toUpperCase()} x${quantity} @ $${entryPrice}`);
+      console.log(`  Added position: ${symResult.data} x${qtyResult.data} @ $${priceResult.data}`);
     });
 }

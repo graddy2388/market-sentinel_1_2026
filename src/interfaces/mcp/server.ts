@@ -6,7 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { fetch24hrCached, fetchCandlesCached } from "../../data/coingecko.js";
+import { fetch24hrCached, fetchCandlesCached } from "../../data/providers.js";
 import { startPoller, stopPoller } from "../../data/poller.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
@@ -15,11 +15,17 @@ import { getDb, saveDb, closeDb } from "../../state/db.js";
 import { watchlist, positions, alerts } from "../../state/schema.js";
 import { eq } from "drizzle-orm";
 import type { CandleInterval } from "../../data/types.js";
-
-// Input validation helpers
-const symbolSchema = z.string().min(1).max(10).regex(/^[A-Za-z]+$/, "Symbol must be letters only");
-const intervalSchema = z.enum(["1m", "5m", "15m", "1h", "4h", "1d"]).default("1h");
-const candlesSchema = z.number().int().min(1).max(500).default(100);
+import {
+  symbolSchema,
+  intervalSchemaWithDefault as intervalSchema,
+  candlesSchemaWithDefault as candlesSchema,
+  marketSchema,
+  quantitySchema,
+  priceSchema,
+  thresholdSchema,
+  descriptionSchema,
+  notesSchema,
+} from "../../validation.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -328,15 +334,21 @@ function parseJsonBody(req: IncomingMessage): Promise<unknown> {
   });
 }
 
-// --- Rate limiting (per-IP, in-memory) ---
-const RATE_LIMIT = 120;        // max requests per window
-const RATE_WINDOW_MS = 60_000; // 1-minute window
+// --- Rate limiting (per-IP, in-memory, bounded) ---
+const RATE_LIMIT = 120;            // max requests per window
+const RATE_WINDOW_MS = 60_000;     // 1-minute window
+const MAX_RATE_ENTRIES = 10_000;   // cap map size to prevent memory exhaustion
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   const entry = rateLimiter.get(ip);
   if (!entry || now > entry.resetAt) {
+    // Evict oldest entries if map is at capacity
+    if (rateLimiter.size >= MAX_RATE_ENTRIES) {
+      const firstKey = rateLimiter.keys().next().value;
+      if (firstKey !== undefined) rateLimiter.delete(firstKey);
+    }
     rateLimiter.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
     return true;
   }
@@ -352,8 +364,9 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-// --- Session TTL (clean up abandoned MCP sessions) ---
+// --- Session TTL (clean up abandoned MCP sessions, bounded) ---
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_SESSIONS = 100;              // cap concurrent sessions
 const sessionLastSeen = new Map<string, number>();
 
 async function startHttp() {
@@ -393,6 +406,12 @@ async function startHttp() {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://localhost:${MCP_PORT}`);
 
+    // --- Security headers on all responses ---
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow");
+
     // --- Rate limiting ---
     const clientIp = req.socket.remoteAddress ?? "unknown";
     if (url.pathname !== "/health" && !checkRateLimit(clientIp)) {
@@ -424,6 +443,16 @@ async function startHttp() {
             transport = transports.get(sessionId)!;
             sessionLastSeen.set(sessionId, Date.now());
           } else if (!sessionId && isInitializeRequest(body)) {
+            // Reject if we've hit the session cap
+            if (transports.size >= MAX_SESSIONS) {
+              res.writeHead(503, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32000, message: "Too many active sessions" },
+                id: null,
+              }));
+              return;
+            }
             // New session — create a fresh server + transport pair
             transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: () => randomUUID(),
@@ -511,9 +540,10 @@ async function startHttp() {
     res.end("Not Found");
   });
 
-  httpServer.listen(MCP_PORT, "0.0.0.0", async () => {
-    console.log(`[Market Sentinel] MCP StreamableHTTP server listening on http://0.0.0.0:${MCP_PORT}/mcp`);
-    console.log(`[Market Sentinel] Health check: http://0.0.0.0:${MCP_PORT}/health`);
+  const MCP_HOST = process.env.MCP_HOST || "127.0.0.1";
+  httpServer.listen(MCP_PORT, MCP_HOST, async () => {
+    console.log(`[Market Sentinel] MCP StreamableHTTP server listening on http://${MCP_HOST}:${MCP_PORT}/mcp`);
+    console.log(`[Market Sentinel] Health check: http://${MCP_HOST}:${MCP_PORT}/health`);
 
     // Start Discord bot + alert engine if configured
     if (hasDiscord()) {

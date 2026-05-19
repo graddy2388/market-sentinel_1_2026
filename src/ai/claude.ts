@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { appConfig } from "../config.js";
 import { analysisResponseSchema, critiqueResponseSchema } from "./types.js";
+import { safeFetchImage } from "./safe-fetch.js";
 import type { AnalysisResponse, CritiqueResponse } from "./types.js";
 
 let client: Anthropic | null = null;
@@ -15,12 +16,17 @@ function getClient(): Anthropic {
   return client;
 }
 
+const AI_CALL_TIMEOUT_MS = 30_000;
+
 async function chatCompletion(prompt: string): Promise<string> {
-  const response = await getClient().messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1000,
-    messages: [{ role: "user", content: prompt }],
-  });
+  const response = await getClient().messages.create(
+    {
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: prompt }],
+    },
+    { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
+  );
   const block = response.content[0];
   if (block.type !== "text") throw new Error("Unexpected response type");
   return block.text;
@@ -45,12 +51,15 @@ export async function chatWithClaude(
   systemPrompt: string,
   userMessage: string
 ): Promise<string> {
-  const response = await getClient().messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1000,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userMessage }],
-  });
+  const response = await getClient().messages.create(
+    {
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+    },
+    { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
+  );
   const block = response.content[0];
   if (block.type !== "text") throw new Error("Unexpected response type");
   return block.text;
@@ -61,34 +70,30 @@ export async function chatWithClaudeVision(
   userMessage: string,
   imageUrl: string
 ): Promise<string> {
-  // Fetch the image and convert to base64
-  const res = await fetch(imageUrl);
-  const buffer = Buffer.from(await res.arrayBuffer());
+  // Safe fetch: SSRF protection, size limit, timeout, HTTPS-only, Discord CDN only
+  const { buffer, mediaType } = await safeFetchImage(imageUrl);
   const base64 = buffer.toString("base64");
 
-  // Detect media type from URL or default to png
-  let mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" = "image/png";
-  if (imageUrl.match(/\.jpe?g/i)) mediaType = "image/jpeg";
-  else if (imageUrl.match(/\.gif/i)) mediaType = "image/gif";
-  else if (imageUrl.match(/\.webp/i)) mediaType = "image/webp";
-
-  const response = await getClient().messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1500,
-    system: systemPrompt,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image",
-            source: { type: "base64", media_type: mediaType, data: base64 },
-          },
-          { type: "text", text: userMessage || "Analyze this chart/screenshot." },
-        ],
-      },
-    ],
-  });
+  const response = await getClient().messages.create(
+    {
+      model: "claude-sonnet-4-6",
+      max_tokens: 1500,
+      system: systemPrompt,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: mediaType, data: base64 },
+            },
+            { type: "text", text: userMessage || "Analyze this chart/screenshot." },
+          ],
+        },
+      ],
+    },
+    { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
+  );
   const block = response.content[0];
   if (block.type !== "text") throw new Error("Unexpected response type");
   return block.text;

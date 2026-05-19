@@ -24,6 +24,8 @@ const configSchema = z.object({
     .default("BTC,ETH,SPY,SLV")
     .transform((s) => s.split(",")),
   ALERT_COOLDOWN_MINUTES: z.coerce.number().default(15),
+  BRIEFING_HOUR: z.coerce.number().min(0).max(23).default(8),
+  BRIEFING_TZ_OFFSET: z.coerce.number().min(-12).max(14).default(-4),
 });
 
 const parsed = configSchema.safeParse(process.env);

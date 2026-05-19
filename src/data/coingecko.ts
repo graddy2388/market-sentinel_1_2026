@@ -4,21 +4,68 @@ import { cache } from "./cache.js";
 const BASE_URL = "https://api.coingecko.com/api/v3";
 
 const SYMBOL_TO_ID: Record<string, string> = {
+  // Top-tier
   BTC: "bitcoin",
   ETH: "ethereum",
   SOL: "solana",
-  ADA: "cardano",
-  DOT: "polkadot",
-  AVAX: "avalanche-2",
-  MATIC: "matic-network",
-  LINK: "chainlink",
-  DOGE: "dogecoin",
   XRP: "ripple",
   BNB: "binancecoin",
+  ADA: "cardano",
+  DOGE: "dogecoin",
+  DOT: "polkadot",
+  AVAX: "avalanche-2",
+  LINK: "chainlink",
+  MATIC: "matic-network",
   LTC: "litecoin",
   ATOM: "cosmos",
   UNI: "uniswap",
   SHIB: "shiba-inu",
+
+  // Layer 1s / Layer 2s
+  HBAR: "hedera-hashgraph",
+  NEAR: "near",
+  APT: "aptos",
+  SUI: "sui",
+  SEI: "sei-network",
+  FTM: "fantom",
+  ARB: "arbitrum",
+  OP: "optimism",
+  INJ: "injective-protocol",
+  TIA: "celestia",
+  ALGO: "algorand",
+  ICP: "internet-computer",
+  FIL: "filecoin",
+  VET: "vechain",
+  HYPE: "hyperliquid",
+  XLM: "stellar",
+  TRX: "tron",
+  TON: "the-open-network",
+
+  // DeFi / Infrastructure
+  AAVE: "aave",
+  MKR: "maker",
+  CRV: "curve-dao-token",
+  RENDER: "render-token",
+  FET: "fetch-ai",
+  GRT: "the-graph",
+  IMX: "immutable-x",
+  STX: "blockstack",
+  RUNE: "thorchain",
+
+  // Memecoins
+  PEPE: "pepe",
+  WIF: "dogwifcoin",
+  BONK: "bonk",
+  FLOKI: "floki",
+
+  // Exchange tokens
+  CRO: "crypto-com-chain",
+  OKB: "okb",
+  LEO: "leo-token",
+
+  // Stablecoins (for reference / portfolio tracking)
+  USDT: "tether",
+  USDC: "usd-coin",
 };
 
 function getCoingeckoId(symbol: string): string | null {

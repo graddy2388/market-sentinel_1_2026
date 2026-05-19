@@ -6,13 +6,38 @@ import {
   type TextChannel,
 } from "discord.js";
 import { appConfig } from "../../config.js";
-import { commands, handlePrice, handleAnalyze, handleAlerts } from "./commands.js";
+import { commands, handlePrice, handleAnalyze, handleAlerts, handleHelp } from "./commands.js";
 import { alertEmbed } from "./embeds.js";
-import { handleChatMessage, handleImageMessage } from "./chat.js";
+import { handleChatMessage, handleImageMessage, type ChatResponse } from "./chat.js";
+import { startBriefingScheduler, stopBriefingScheduler } from "./briefing.js";
 import type { TriggeredAlert } from "../../alerts/engine.js";
 
 let client: Client | null = null;
 let alertChannelId: string | null = null;
+
+// --- Per-user rate limiting for chat messages ---
+const USER_RATE_LIMIT = 5;        // max requests per window
+const USER_RATE_WINDOW_MS = 60_000; // 1-minute window
+const userRateLimiter = new Map<string, { count: number; resetAt: number }>();
+
+function checkUserRateLimit(userId: string): boolean {
+  const now = Date.now();
+  const entry = userRateLimiter.get(userId);
+  if (!entry || now > entry.resetAt) {
+    userRateLimiter.set(userId, { count: 1, resetAt: now + USER_RATE_WINDOW_MS });
+    return true;
+  }
+  entry.count++;
+  return entry.count <= USER_RATE_LIMIT;
+}
+
+// Clean up stale entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of userRateLimiter) {
+    if (now > entry.resetAt) userRateLimiter.delete(id);
+  }
+}, 5 * 60_000).unref();
 
 export async function startDiscordBot(): Promise<Client> {
   const token = appConfig.DISCORD_BOT_TOKEN!;
@@ -38,6 +63,9 @@ export async function startDiscordBot(): Promise<Client> {
     } catch (err) {
       console.error("[Discord] Failed to register slash commands:", err);
     }
+
+    // Start the daily briefing scheduler
+    startBriefingScheduler(c);
   });
 
   client.on(Events.InteractionCreate, async (interaction) => {
@@ -53,6 +81,9 @@ export async function startDiscordBot(): Promise<Client> {
           break;
         case "alerts":
           await handleAlerts(interaction);
+          break;
+        case "help":
+          await handleHelp(interaction);
           break;
         default:
           await interaction.reply({ content: "Unknown command.", ephemeral: true });
@@ -81,6 +112,14 @@ export async function startDiscordBot(): Promise<Client> {
 
     if (!isDM && !isMentioned) return;
 
+    // Per-user rate limiting — 5 requests per minute
+    if (!checkUserRateLimit(message.author.id)) {
+      try {
+        await message.reply("You're sending messages too fast. Please wait a moment before trying again.");
+      } catch { /* ignore */ }
+      return;
+    }
+
     // Strip the @mention from the message content to get the actual question
     let question = message.content;
     if (client!.user) {
@@ -104,7 +143,13 @@ export async function startDiscordBot(): Promise<Client> {
       } else {
         const responses = await handleChatMessage(question);
         for (const response of responses) {
-          await message.reply(response);
+          const opts: { content: string; files?: { attachment: Buffer; name: string }[] } = {
+            content: response.content,
+          };
+          if (response.chart) {
+            opts.files = [{ attachment: response.chart, name: `${response.symbol ?? "chart"}.png` }];
+          }
+          await message.reply(opts);
         }
       }
     } catch (err) {
@@ -137,6 +182,7 @@ export async function sendAlertNotification(alert: TriggeredAlert, currentPrice:
 }
 
 export async function stopDiscordBot(): Promise<void> {
+  stopBriefingScheduler();
   if (client) {
     await client.destroy();
     client = null;

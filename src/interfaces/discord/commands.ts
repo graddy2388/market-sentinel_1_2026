@@ -2,12 +2,13 @@ import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
 } from "discord.js";
-import { fetch24hrCached, fetchCandlesCached } from "../../data/coingecko.js";
+import { fetch24hrCached, fetchCandlesCached } from "../../data/providers.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { getDb } from "../../state/db.js";
 import { alerts } from "../../state/schema.js";
 import { eq } from "drizzle-orm";
-import { priceEmbed, analysisEmbed, alertListEmbed } from "./embeds.js";
+import { symbolSchema } from "../../validation.js";
+import { priceEmbed, analysisEmbed, alertListEmbed, helpEmbed } from "./embeds.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -27,10 +28,20 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("alerts")
     .setDescription("List all active price alerts"),
+
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Show what Market Sentinel can do and which AI models are active"),
 ];
 
 export async function handlePrice(interaction: ChatInputCommandInteraction): Promise<void> {
-  const symbol = interaction.options.getString("symbol", true).toUpperCase();
+  const raw = interaction.options.getString("symbol", true);
+  const parsed = symbolSchema.safeParse(raw);
+  if (!parsed.success) {
+    await interaction.reply({ content: "Invalid symbol. Use letters only (e.g. BTC, ETH).", ephemeral: true });
+    return;
+  }
+  const symbol = parsed.data;
   await interaction.deferReply();
 
   const data = await fetch24hrCached(symbol);
@@ -43,7 +54,13 @@ export async function handlePrice(interaction: ChatInputCommandInteraction): Pro
 }
 
 export async function handleAnalyze(interaction: ChatInputCommandInteraction): Promise<void> {
-  const symbol = interaction.options.getString("symbol", true).toUpperCase();
+  const raw = interaction.options.getString("symbol", true);
+  const parsed = symbolSchema.safeParse(raw);
+  if (!parsed.success) {
+    await interaction.reply({ content: "Invalid symbol. Use letters only (e.g. BTC, ETH).", ephemeral: true });
+    return;
+  }
+  const symbol = parsed.data;
   await interaction.deferReply();
 
   const candles = await fetchCandlesCached(symbol, "1h", 100);
@@ -78,4 +95,8 @@ export async function handleAlerts(interaction: ChatInputCommandInteraction): Pr
   }));
 
   await interaction.editReply({ embeds: [alertListEmbed(rows)] });
+}
+
+export async function handleHelp(interaction: ChatInputCommandInteraction): Promise<void> {
+  await interaction.reply({ embeds: [helpEmbed()], ephemeral: true });
 }

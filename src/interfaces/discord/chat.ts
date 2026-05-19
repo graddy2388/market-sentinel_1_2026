@@ -1,18 +1,95 @@
-import { fetch24hrCached, fetchCandlesCached, getSupportedSymbols } from "../../data/coingecko.js";
+import { fetch24hrCached, fetchCandlesCached, getSupportedSymbols, isSymbolAvailable } from "../../data/providers.js";
+import { isFinnhubAvailable } from "../../data/finnhub.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
 import { chatWithClaude, chatWithClaudeVision } from "../../ai/claude.js";
 import { chatWithOpenAI, chatWithOpenAIVision } from "../../ai/openai.js";
 import { hasClaude, hasOpenAI, hasAnyAI } from "../../config.js";
+import { renderChart } from "../../charts/renderer.js";
 import type { CouncilAnalysisResult, CouncilCritiqueResult, ModelVote } from "../../ai/types.js";
 import type { TechnicalSummary } from "../../analysis/types.js";
 
+/** A chat response — text content with an optional chart image. */
+export interface ChatResponse {
+  content: string;
+  chart?: Buffer;
+  symbol?: string;
+}
+
 const DISCORD_CHAR_LIMIT = 2000;
 
+// ---------------------------------------------------------------------------
+// System prompts — mentor/advisor tone
+// ---------------------------------------------------------------------------
+
+/**
+ * Default system prompt for general and deep-analysis questions.
+ * Mentor voice: direct, honest, but not cold. Like a trading buddy
+ * who's been at it for years and genuinely wants you to do well.
+ */
 const SYSTEM_PROMPT =
-  "You are Market Sentinel, a blunt and honest trading advisor. " +
-  "You have access to crypto market data. Be concise — this is Discord, not an essay. " +
+  "You are Market Sentinel, a seasoned trading advisor. " +
+  "You're direct and honest — you don't sugarcoat — but you care about the person you're talking to. " +
+  "Think of yourself as a mentor who's seen a lot of cycles. " +
+  "You have access to real-time crypto market data. " +
+  "Be concise — this is Discord, not an essay. " +
   "If the user asks about a specific asset without naming it, ask them to specify.";
+
+/**
+ * System prompt for quick questions (buy/sell, bull/bear, one-word, etc.).
+ * The AI should match the user's energy and keep it short.
+ */
+const QUICK_SYSTEM_PROMPT =
+  "You are Market Sentinel, a seasoned trading advisor on Discord. " +
+  "The user wants a SHORT answer — match their energy. " +
+  "If they ask for one word, give them one word and maybe a one-sentence reason. " +
+  "If they ask buy or sell, just tell them and briefly say why. " +
+  "Don't dump data they didn't ask for. Be direct but not robotic — " +
+  "you're a mentor who respects people's time. " +
+  "Use the market data provided to inform your answer but don't list every indicator.";
+
+// ---------------------------------------------------------------------------
+// Question depth detection
+// ---------------------------------------------------------------------------
+
+export type QuestionDepth = "quick" | "deep";
+
+/**
+ * Classify whether a message warrants a full council analysis or a quick
+ * AI-powered answer with market context.
+ */
+export function detectQuestionDepth(text: string): QuestionDepth {
+  const lower = text.toLowerCase().trim();
+
+  // Explicit requests for brevity → quick
+  if (/\b(one word|1 word|quick|short|brief|tldr|tl;dr|simple|just tell me)\b/i.test(lower)) {
+    return "quick";
+  }
+
+  // "Buy or sell?" / "bull or bear?" style questions → quick
+  if (/\b(buy|sell|hold|bull|bear)\b.*\b(or)\b.*\b(buy|sell|hold|bull|bear)\b/i.test(lower)) {
+    return "quick";
+  }
+
+  // Very short questions with a symbol (< 60 chars) → quick
+  // e.g. "is BTC a buy?" "how's ETH?" "XRP thoughts?"
+  if (lower.length < 60) {
+    return "quick";
+  }
+
+  // Explicit requests for depth → deep
+  if (/\b(analy[sz]e|breakdown|technicals|full|detailed|deep dive|in.?depth|signals|indicators|compare)\b/i.test(lower)) {
+    return "deep";
+  }
+
+  // Trade proposals always get the full council treatment
+  if (isTradeProposal(text)) {
+    return "deep";
+  }
+
+  // Default: if the message is moderately long, go deep; otherwise quick
+  return lower.length > 120 ? "deep" : "quick";
+}
 
 /**
  * Build a regex that matches any supported symbol as a standalone word.
@@ -66,6 +143,50 @@ function isTradeProposal(text: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Compact market context for quick answers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a concise market snapshot string that gives the AI enough context
+ * to answer a quick question without running the full council.
+ */
+function buildQuickContext(
+  symbol: string,
+  price: number | null,
+  change24h: number | null,
+  technicals: TechnicalSummary | null
+): string {
+  const parts: string[] = [];
+
+  if (price != null && change24h != null) {
+    const dir = change24h >= 0 ? "up" : "down";
+    parts.push(`${symbol} is at $${price.toLocaleString()} (${dir} ${Math.abs(change24h).toFixed(2)}% in 24h).`);
+  } else {
+    parts.push(`${symbol} — price data unavailable.`);
+  }
+
+  if (technicals) {
+    const { indicators, overallDirection, overallStrength } = technicals;
+    const snippets: string[] = [];
+
+    if (indicators.rsi != null) {
+      const label =
+        indicators.rsi > 70 ? "overbought" : indicators.rsi < 30 ? "oversold" : "neutral zone";
+      snippets.push(`RSI ${indicators.rsi.toFixed(0)} (${label})`);
+    }
+    if (indicators.macd) {
+      const macdDir = indicators.macd.histogram > 0 ? "bullish" : "bearish";
+      snippets.push(`MACD ${macdDir}`);
+    }
+    snippets.push(`Overall signal: ${overallDirection} (${(overallStrength * 100).toFixed(0)}% strength)`);
+
+    parts.push(`Technicals: ${snippets.join(", ")}.`);
+  }
+
+  return parts.join(" ");
+}
+
+// ---------------------------------------------------------------------------
 // Council analysis formatting — rich output
 // ---------------------------------------------------------------------------
 
@@ -76,21 +197,14 @@ function formatVoteDetailed(vote: ModelVote): string {
   const lines: string[] = [];
 
   lines.push(`**${vote.model}** — ${dir} (${conf}%)`);
-  lines.push(v.reasoning);
 
-  // Key levels + timeframe on one line
-  const levelParts: string[] = [];
-  if (v.keyLevels.support != null) levelParts.push(`Support: $${v.keyLevels.support.toLocaleString()}`);
-  if (v.keyLevels.resistance != null) levelParts.push(`Resistance: $${v.keyLevels.resistance.toLocaleString()}`);
-  if (levelParts.length > 0) levelParts.push(`Timeframe: ${v.timeframe}`);
-  if (levelParts.length > 0) lines.push(levelParts.join(" | "));
+  // Trim reasoning to ~120 chars to keep things readable
+  const reason = v.reasoning.length > 120
+    ? v.reasoning.slice(0, 117) + "..."
+    : v.reasoning;
+  lines.push(reason);
 
-  // Risks
-  if (v.risks.length > 0) {
-    lines.push(`Risks: ${v.risks.join(", ")}`);
-  }
-
-  // Action
+  // Action is the most useful part — surface it prominently
   if (v.actionSuggestion) {
     lines.push(`> ${v.actionSuggestion}`);
   }
@@ -102,91 +216,6 @@ function formatVoteCompact(vote: ModelVote): string {
   const v = vote.analysis;
   const dir = v.direction === "bullish" ? "BULL" : v.direction === "bearish" ? "BEAR" : "NEUTRAL";
   return `**${vote.model}:** ${dir} ${(v.confidence * 100).toFixed(0)}%`;
-}
-
-function buildDisagreementBreakdown(votes: ModelVote[]): string[] {
-  if (votes.length < 2) return [];
-  const lines: string[] = [];
-
-  // Direction analysis — show who said what and a snippet of why
-  const directionGroups = new Map<string, ModelVote[]>();
-  for (const v of votes) {
-    const group = directionGroups.get(v.analysis.direction) ?? [];
-    group.push(v);
-    directionGroups.set(v.analysis.direction, group);
-  }
-
-  if (directionGroups.size > 1) {
-    for (const [dir, group] of directionGroups) {
-      const names = group.map((v) => v.model).join(", ");
-      // Grab the first 60 chars of reasoning from the first model in this group
-      const snippet = group[0].analysis.reasoning.slice(0, 80);
-      const ellipsis = group[0].analysis.reasoning.length > 80 ? "..." : "";
-      lines.push(`**${dir.toUpperCase()}** (${names}): ${snippet}${ellipsis}`);
-    }
-  }
-
-  // Key level comparison
-  const supports = votes.filter((v) => v.analysis.keyLevels.support != null).map((v) => ({
-    model: v.model,
-    level: v.analysis.keyLevels.support!,
-  }));
-  const resistances = votes.filter((v) => v.analysis.keyLevels.resistance != null).map((v) => ({
-    model: v.model,
-    level: v.analysis.keyLevels.resistance!,
-  }));
-
-  if (supports.length >= 2) {
-    const min = Math.min(...supports.map((s) => s.level));
-    const max = Math.max(...supports.map((s) => s.level));
-    if (max - min > min * 0.01) {
-      // >1% difference — worth noting
-      lines.push(`Support range: $${min.toLocaleString()} – $${max.toLocaleString()}`);
-    } else {
-      lines.push(`Support consensus: ~$${min.toLocaleString()}`);
-    }
-  }
-
-  if (resistances.length >= 2) {
-    const min = Math.min(...resistances.map((r) => r.level));
-    const max = Math.max(...resistances.map((r) => r.level));
-    if (max - min > min * 0.01) {
-      lines.push(`Resistance range: $${min.toLocaleString()} – $${max.toLocaleString()}`);
-    } else {
-      lines.push(`Resistance consensus: ~$${min.toLocaleString()}`);
-    }
-  }
-
-  // Confidence spread
-  const confidences = votes.map((v) => ({ model: v.model, conf: v.analysis.confidence }));
-  const maxC = confidences.reduce((a, b) => (a.conf > b.conf ? a : b));
-  const minC = confidences.reduce((a, b) => (a.conf < b.conf ? a : b));
-  if (maxC.conf - minC.conf > 0.15) {
-    lines.push(
-      `Confidence: ${minC.model} ${(minC.conf * 100).toFixed(0)}% → ${maxC.model} ${(maxC.conf * 100).toFixed(0)}%`
-    );
-  }
-
-  // Risks that only one model flagged (when 3+ models)
-  if (votes.length >= 3) {
-    const riskCount = new Map<string, string[]>();
-    for (const v of votes) {
-      for (const risk of v.analysis.risks) {
-        const key = risk.toLowerCase().slice(0, 40);
-        const models = riskCount.get(key) ?? [];
-        models.push(v.model);
-        riskCount.set(key, models);
-      }
-    }
-    const unique = [...riskCount.entries()]
-      .filter(([, models]) => models.length === 1)
-      .slice(0, 2);
-    for (const [risk, [model]] of unique) {
-      lines.push(`Only ${model} flagged: "${risk}"`);
-    }
-  }
-
-  return lines;
 }
 
 function aggregateRisks(votes: ModelVote[]): string[] {
@@ -207,120 +236,115 @@ function aggregateRisks(votes: ModelVote[]): string[] {
 function formatCouncilAnalysis(result: CouncilAnalysisResult): string {
   const parts: string[] = [];
 
-  // Council verdict with breakdown
-  const b = result.directionBreakdown;
-  const breakdownStr = [
-    b.bullish > 0 ? `${b.bullish} bullish` : null,
-    b.bearish > 0 ? `${b.bearish} bearish` : null,
-    b.neutral > 0 ? `${b.neutral} neutral` : null,
-  ].filter(Boolean).join(" / ");
+  if (result.votes.length === 0) {
+    return "All AI models failed to respond. Try again later.";
+  }
 
+  // ── Council verdict — one punchy line ──
   if (result.consensus) {
     parts.push(`**Council:** ${result.consensus}`);
   } else {
+    const b = result.directionBreakdown;
+    const breakdownStr = [
+      b.bullish > 0 ? `${b.bullish} bullish` : null,
+      b.bearish > 0 ? `${b.bearish} bearish` : null,
+      b.neutral > 0 ? `${b.neutral} neutral` : null,
+    ].filter(Boolean).join(" / ");
     parts.push(`**Council:** ${breakdownStr}`);
   }
 
-  // Aggregate key levels from all votes
+  // ── Key levels (aggregated) on one compact line ──
   const supports = result.votes.map((v) => v.analysis.keyLevels.support).filter((s): s is number => s != null);
   const resistances = result.votes.map((v) => v.analysis.keyLevels.resistance).filter((r): r is number => r != null);
-  const metaLine: string[] = [`Avg confidence: ${(result.avgConfidence * 100).toFixed(0)}%`];
+  const levelParts: string[] = [];
   if (supports.length > 0) {
     const avg = supports.reduce((a, b) => a + b, 0) / supports.length;
-    metaLine.push(`Support: ~$${avg.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+    levelParts.push(`Support ~$${avg.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
   }
   if (resistances.length > 0) {
     const avg = resistances.reduce((a, b) => a + b, 0) / resistances.length;
-    metaLine.push(`Resistance: ~$${avg.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+    levelParts.push(`Resistance ~$${avg.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
   }
-  parts.push(metaLine.join(" | "));
+  if (levelParts.length > 0) {
+    parts.push(levelParts.join(" | "));
+  }
 
+  // ── Per-model breakdown ──
   if (result.votes.length <= 3) {
-    // Detailed per-model output
     for (const vote of result.votes) {
       parts.push("");
       parts.push(formatVoteDetailed(vote));
     }
   } else {
-    // Compact per-model + aggregated data
+    // Compact one-liner per model
     parts.push("");
     parts.push(result.votes.map(formatVoteCompact).join(" | "));
 
-    // Aggregated risks across council
-    const topRisks = aggregateRisks(result.votes);
-    if (topRisks.length > 0) {
-      parts.push(`\n**Top risks:** ${topRisks.join(", ")}`);
-    }
-
-    // Top recommendation from highest-confidence model
+    // Surface the top recommendation
     const top = [...result.votes].sort((a, b) => b.analysis.confidence - a.analysis.confidence)[0];
     if (top?.analysis.actionSuggestion) {
-      parts.push(`**Top recommendation (${top.model}, ${(top.analysis.confidence * 100).toFixed(0)}%):** ${top.analysis.actionSuggestion}`);
+      parts.push(`> ${top.analysis.actionSuggestion} — *${top.model}*`);
     }
+
+    // Top 3 aggregated risks (keep it tight)
+    const topRisks = aggregateRisks(result.votes);
+    if (topRisks.length > 0) {
+      parts.push(`**Risks:** ${topRisks.slice(0, 3).join(", ")}`);
+    }
+  }
+
+  // ── Disagreements — only show if there's a real directional split ──
+  const directionGroups = new Map<string, string[]>();
+  for (const v of result.votes) {
+    const group = directionGroups.get(v.analysis.direction) ?? [];
+    group.push(v.model);
+    directionGroups.set(v.analysis.direction, group);
+  }
+  if (directionGroups.size > 1) {
+    const splitParts = Array.from(directionGroups.entries())
+      .map(([dir, models]) => `${models.join(", ")} → ${dir}`)
+      .join(" vs ");
+    parts.push(`\n⚠️ **Split:** ${splitParts}`);
   }
 
   if (result.failed.length > 0) {
-    parts.push(`\n*Failed:* ${result.failed.map((f) => f.model).join(", ")}`);
-  }
-
-  // Rich disagreement breakdown
-  const disagreements = buildDisagreementBreakdown(result.votes);
-  if (disagreements.length > 0) {
-    parts.push(`\n**Where they diverge:**`);
-    for (const line of disagreements) {
-      parts.push(line);
-    }
-  }
-
-  if (result.votes.length === 0) {
-    parts.push("All AI models failed to respond. Try again later.");
+    parts.push(`*${result.failed.length} model${result.failed.length > 1 ? "s" : ""} failed*`);
   }
 
   return parts.join("\n");
 }
 
 function formatCouncilCritique(result: CouncilCritiqueResult): string {
+  if (result.opinions.length === 0) {
+    return "All AI models failed to respond. Try again later.";
+  }
+
   const parts: string[] = [];
 
   const tag = result.majorityAssessment.toUpperCase();
-  parts.push(`**Council Verdict:** ${tag} (avg score ${result.avgScore.toFixed(1)}/10)`);
+  const emoji = tag === "GOOD" ? "✅" : tag === "RISKY" ? "⚠️" : "🚫";
+  parts.push(`${emoji} **Verdict:** ${tag} (${result.avgScore.toFixed(1)}/10)`);
 
-  if (result.opinions.length <= 3) {
-    for (const o of result.opinions) {
-      const c = o.critique;
-      parts.push("");
-      parts.push(
-        `**${o.model}:** ${c.overallAssessment.toUpperCase()} (${c.score}/10) — ${c.recommendation}`
-      );
-      if (c.issues.length > 0) {
-        const top = c.issues.slice(0, 3);
-        parts.push(top.map((i) => `> [${i.severity}] ${i.description}`).join("\n"));
-      }
-    }
-  } else {
-    for (const o of result.opinions) {
-      const c = o.critique;
-      const shortRec = c.recommendation.length > 80 ? c.recommendation.slice(0, 77) + "..." : c.recommendation;
-      parts.push(`**${o.model}:** ${c.overallAssessment.toUpperCase()} ${c.score}/10 — ${shortRec}`);
-    }
+  // Show recommendations — one line per model
+  for (const o of result.opinions) {
+    const c = o.critique;
+    const shortRec = c.recommendation.length > 100 ? c.recommendation.slice(0, 97) + "..." : c.recommendation;
+    parts.push(`**${o.model}** ${c.score}/10 — ${shortRec}`);
+  }
 
-    const allIssues = result.opinions
-      .flatMap((o) => o.critique.issues.filter((i) => i.severity === "critical" || i.severity === "high"))
-      .slice(0, 5);
-    if (allIssues.length > 0) {
-      parts.push(`\n**Key Issues:**`);
-      for (const issue of allIssues) {
-        parts.push(`> [${issue.severity}] ${issue.description}`);
-      }
+  // Surface critical/high issues only
+  const criticalIssues = result.opinions
+    .flatMap((o) => o.critique.issues.filter((i) => i.severity === "critical" || i.severity === "high"))
+    .slice(0, 3);
+  if (criticalIssues.length > 0) {
+    parts.push("");
+    for (const issue of criticalIssues) {
+      parts.push(`> ⚠️ ${issue.description}`);
     }
   }
 
   if (result.failed.length > 0) {
-    parts.push(`\n*Failed:* ${result.failed.map((f) => f.model).join(", ")}`);
-  }
-
-  if (result.opinions.length === 0) {
-    parts.push("All AI models failed to respond. Try again later.");
+    parts.push(`*${result.failed.length} model${result.failed.length > 1 ? "s" : ""} failed*`);
   }
 
   return parts.join("\n");
@@ -338,7 +362,9 @@ function truncate(text: string): string {
 async function handleSymbolQuestion(
   symbol: string,
   question: string
-): Promise<string> {
+): Promise<ChatResponse> {
+  const depth = detectQuestionDepth(question);
+
   const [marketData, candles] = await Promise.all([
     fetch24hrCached(symbol),
     fetchCandlesCached(symbol, "1h", 100),
@@ -353,22 +379,55 @@ async function handleSymbolQuestion(
     ? `${symbol} — $${marketData.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${marketData.changePercent24h >= 0 ? "+" : ""}${marketData.changePercent24h.toFixed(2)}% 24h)`
     : `${symbol} — price data unavailable`;
 
+  // ── Quick path: short AI answer with market context, no council ──
+  if (depth === "quick") {
+    const context = buildQuickContext(
+      symbol,
+      marketData?.price ?? null,
+      marketData?.changePercent24h ?? null,
+      technicals,
+    );
+    const prompt = `${context}\n\nUser question: ${question}`;
+    const text = await singleAIChat(QUICK_SYSTEM_PROMPT, prompt);
+    // No chart for quick questions — keep it snappy
+    return { content: `**${priceInfo}**\n${text}`, symbol };
+  }
+
+  // ── Deep path: full council analysis with chart ──
+
+  // Generate chart image if we have enough candles
+  let chart: Buffer | undefined;
+  if (candles.length >= 10) {
+    try {
+      chart = await renderChart(
+        candles,
+        symbol,
+        marketData?.price,
+        marketData?.changePercent24h,
+      );
+    } catch (err) {
+      console.error(`[Chat] Chart render failed for ${symbol}:`, err);
+    }
+  }
+
   if (isTradeProposal(question) && technicals) {
     const critique = await councilCritique(question, technicals);
-    return `**${priceInfo}**\n\n${formatCouncilCritique(critique)}`;
+    return { content: `**${priceInfo}**\n\n${formatCouncilCritique(critique)}`, chart, symbol };
   }
 
   if (technicals) {
     const analysis = await councilAnalyze(symbol, technicals);
-    return `**${priceInfo}**\n\n${formatCouncilAnalysis(analysis)}`;
+    return { content: `**${priceInfo}**\n\n${formatCouncilAnalysis(analysis)}`, chart, symbol };
   }
 
+  // Not enough data for technicals — fall back to AI chat
   const context = marketData
     ? `Current ${symbol} price: $${marketData.price}. 24h change: ${marketData.changePercent24h.toFixed(2)}%.`
     : `No market data available for ${symbol}.`;
 
   const prompt = `${context}\n\nUser question: ${question}`;
-  return await singleAIChat(SYSTEM_PROMPT, prompt);
+  const text = await singleAIChat(SYSTEM_PROMPT, prompt);
+  return { content: text, chart, symbol };
 }
 
 // ---------------------------------------------------------------------------
@@ -393,9 +452,10 @@ async function singleAIChat(
 // ---------------------------------------------------------------------------
 
 const VISION_PROMPT =
-  "You are Market Sentinel, a blunt and honest trading advisor analyzing a screenshot. " +
-  "Identify what's shown (chart, order book, portfolio, positions, P&L, etc.) and give your analysis. " +
-  "Call out any red flags, risks, or opportunities you see. Be concise — this is Discord.";
+  "You are Market Sentinel, a seasoned trading advisor analyzing a screenshot. " +
+  "Identify what's shown (chart, order book, portfolio, positions, P&L, etc.) and give your take. " +
+  "Call out red flags and opportunities — be honest but not harsh. " +
+  "Keep it concise, this is Discord. Talk like a mentor, not a textbook.";
 
 export async function handleImageMessage(
   question: string,
@@ -422,51 +482,77 @@ export async function handleImageMessage(
 }
 
 /**
- * Handle a chat message. Returns an array of response strings —
+ * Handle a chat message. Returns an array of ChatResponse objects —
  * one per symbol when multiple are mentioned, plus any notes.
+ * Each response includes text content and an optional chart image buffer.
  */
-export async function handleChatMessage(question: string): Promise<string[]> {
+export async function handleChatMessage(question: string): Promise<ChatResponse[]> {
   if (!hasAnyAI()) {
-    return ["No AI models are configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable chat."];
+    return [{ content: "No AI models are configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable chat." }];
   }
 
   const trimmed = question.trim();
   if (!trimmed) {
-    return ["You mentioned me but didn't ask anything. What do you want to know?"];
+    return [{ content: "You mentioned me but didn't ask anything. What do you want to know?" }];
   }
 
   try {
     const symbols = findAllSymbols(trimmed);
 
-    if (symbols.length > 0) {
+    // Also pick up unknown tickers and try them as stock symbols (if Finnhub is up)
+    const unknowns = findUnknownTickers(trimmed, symbols);
+    const resolvedStocks: string[] = [];
+    const trueUnknowns: string[] = [];
+
+    if (unknowns.length > 0 && isFinnhubAvailable()) {
+      // Check unknown tickers against Finnhub in parallel
+      const checks = await Promise.allSettled(
+        unknowns.map(async (ticker) => {
+          const available = await isSymbolAvailable(ticker);
+          return { ticker, available };
+        })
+      );
+      for (const check of checks) {
+        if (check.status === "fulfilled" && check.value.available) {
+          resolvedStocks.push(check.value.ticker);
+        } else if (check.status === "fulfilled") {
+          trueUnknowns.push(check.value.ticker);
+        }
+      }
+    } else {
+      trueUnknowns.push(...unknowns);
+    }
+
+    const allSymbols = [...symbols, ...resolvedStocks];
+
+    if (allSymbols.length > 0) {
       // Process all symbols in parallel
       const results = await Promise.allSettled(
-        symbols.map((sym) => handleSymbolQuestion(sym, trimmed))
+        allSymbols.map((sym) => handleSymbolQuestion(sym, trimmed))
       );
 
-      const responses: string[] = [];
-      for (let i = 0; i < symbols.length; i++) {
+      const responses: ChatResponse[] = [];
+      for (let i = 0; i < allSymbols.length; i++) {
         const result = results[i];
         if (result.status === "fulfilled") {
-          responses.push(truncate(result.value));
+          const r = result.value;
+          responses.push({ content: truncate(r.content), chart: r.chart, symbol: r.symbol });
         } else {
-          responses.push(`**${symbols[i]}** — Analysis failed. Try again in a moment.`);
+          responses.push({ content: `**${allSymbols[i]}** — Analysis failed. Try again in a moment.`, symbol: allSymbols[i] });
         }
       }
 
-      // Check for ticker-like patterns that aren't supported
-      const unknowns = findUnknownTickers(trimmed, symbols);
-      if (unknowns.length > 0) {
-        responses.push(`Not supported: ${unknowns.join(", ")}. Supported symbols: ${getSupportedSymbols().join(", ")}`);
+      if (trueUnknowns.length > 0) {
+        responses.push({ content: `Couldn't find data for: ${trueUnknowns.join(", ")}` });
       }
 
       return responses;
     }
 
     // General trading question — single AI call
-    return [truncate(await singleAIChat(SYSTEM_PROMPT, trimmed))];
+    return [{ content: truncate(await singleAIChat(SYSTEM_PROMPT, trimmed)) }];
   } catch (err) {
     console.error("[Chat] Error handling message:", err);
-    return ["Something went wrong while processing your question. Try again in a moment."];
+    return [{ content: "Something went wrong while processing your question. Try again in a moment." }];
   }
 }

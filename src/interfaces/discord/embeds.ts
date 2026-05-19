@@ -1,4 +1,7 @@
 import { EmbedBuilder } from "discord.js";
+import { getActiveModelNames } from "../../ai/council.js";
+import { getCryptoSymbols, getStockSymbols } from "../../data/providers.js";
+import { isFinnhubAvailable } from "../../data/finnhub.js";
 import type { MarketOverview } from "../../data/types.js";
 import type { TechnicalSummary, SignalDirection } from "../../analysis/types.js";
 import type { TriggeredAlert } from "../../alerts/engine.js";
@@ -137,6 +140,77 @@ export function alertListEmbed(
     .setTitle(`Active Alerts (${alertRows.length})`)
     .setColor(COLOR_BLUE)
     .setDescription(lines.join("\n"))
+    .setFooter({ text: "Market Sentinel" })
+    .setTimestamp();
+}
+
+export function helpEmbed(): EmbedBuilder {
+  const models = getActiveModelNames();
+  const modelStatus = models.length > 0
+    ? models.join(", ")
+    : "None configured — add API keys to .env";
+
+  const cryptoSymbols = getCryptoSymbols();
+  const stockSymbols = getStockSymbols();
+  const finnhub = isFinnhubAvailable();
+
+  // Build markets field
+  const marketsLines: string[] = [];
+  marketsLines.push(`**Crypto** (${cryptoSymbols.length}) — ${cryptoSymbols.slice(0, 12).join(", ")}...`);
+  if (finnhub) {
+    marketsLines.push(`**Stocks & ETFs** (${stockSymbols.length}+) — ${stockSymbols.slice(0, 10).join(", ")}...`);
+    marketsLines.push(`**Commodities** — GLD, SLV (via ETFs)`);
+    marketsLines.push("*Any US ticker works — just ask!*");
+  } else {
+    marketsLines.push("*Add FINNHUB_API_KEY for stocks, ETFs & commodities*");
+  }
+
+  return new EmbedBuilder()
+    .setTitle("Market Sentinel")
+    .setColor(COLOR_BLUE)
+    .setDescription("Your AI-powered trading advisor. Ask me about crypto, stocks, or commodities — I'll give you a straight answer.")
+    .addFields(
+      {
+        name: "Slash Commands",
+        value: [
+          "`/price <symbol>` — Current price + 24h stats",
+          "`/analyze <symbol>` — Technical analysis (RSI, MACD, Bollinger, etc.)",
+          "`/alerts` — View your active price alerts",
+          "`/help` — This message",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "Chat",
+        value: [
+          "**@ mention me** or **DM me** to chat. I scale my response to your question:",
+          '• Quick questions → short answer ("buy or sell BTC?")',
+          '• Deep questions → full council analysis ("analyze ETH technicals")',
+          "• Send a screenshot → I'll analyze charts, positions, or P&L",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "Markets",
+        value: marketsLines.join("\n"),
+        inline: false,
+      },
+      {
+        name: "Tips",
+        value: [
+          '• Ask for "one word" or "quick" if you want a short take',
+          '• Say "analyze" or "breakdown" for the full council treatment',
+          "• Describe a trade idea and I'll critique it honestly",
+          "• I post a daily briefing each morning with top movers + signals",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: `Active AI Models (${models.length})`,
+        value: modelStatus,
+        inline: false,
+      },
+    )
     .setFooter({ text: "Market Sentinel" })
     .setTimestamp();
 }

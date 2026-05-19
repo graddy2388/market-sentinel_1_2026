@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { getDb, saveDb } from "../state/db.js";
 import { alerts } from "../state/schema.js";
-import { fetchPrice, fetch24hr, fetchCandles } from "../data/coingecko.js";
+import { fetchPrice, fetch24hr, fetchCandles } from "../data/providers.js";
 import { analyzeTechnicals } from "../analysis/signals.js";
 
 export interface TriggeredAlert {

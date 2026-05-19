@@ -18,6 +18,9 @@ import type { TechnicalSummary } from "../analysis/types.js";
 // Provider interface
 // ---------------------------------------------------------------------------
 
+/** Per-model timeout for API calls (30 seconds). */
+const AI_CALL_TIMEOUT_MS = 30_000;
+
 interface AIProvider {
   name: string;
   available(): boolean;
@@ -28,6 +31,25 @@ interface AIProvider {
 function parseJson<T>(raw: string, schema: { parse: (v: unknown) => T }): T {
   const cleaned = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
   return schema.parse(JSON.parse(cleaned));
+}
+
+/**
+ * Sanitize upstream error messages before exposing to users.
+ * Strips API keys, URLs, and internal details — returns a generic category.
+ */
+function sanitizeProviderError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const lower = raw.toLowerCase();
+
+  if (lower.includes("timeout") || lower.includes("aborted")) return "request timed out";
+  if (lower.includes("401") || lower.includes("unauthorized") || lower.includes("auth")) return "authentication failed";
+  if (lower.includes("429") || lower.includes("rate limit") || lower.includes("quota")) return "rate limited";
+  if (lower.includes("500") || lower.includes("502") || lower.includes("503")) return "provider unavailable";
+  if (lower.includes("json") || lower.includes("parse") || lower.includes("zod")) return "invalid response format";
+  if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("fetch")) return "connection failed";
+
+  // Default — don't leak raw message
+  return "request failed";
 }
 
 // ---------------------------------------------------------------------------
@@ -52,12 +74,15 @@ function createOAIProvider(
   }
 
   async function complete(prompt: string): Promise<string> {
-    const res = await getClient().chat.completions.create({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 1000,
-    });
+    const res = await getClient().chat.completions.create(
+      {
+        model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.3,
+        max_tokens: 1000,
+      },
+      { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
+    );
     return res.choices[0]?.message?.content ?? "";
   }
 
@@ -89,11 +114,14 @@ function createClaudeProvider(): AIProvider {
   }
 
   async function complete(prompt: string): Promise<string> {
-    const res = await getClient().messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      messages: [{ role: "user", content: prompt }],
-    });
+    const res = await getClient().messages.create(
+      {
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: prompt }],
+      },
+      { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
+    );
     const block = res.content[0];
     if (block.type !== "text") throw new Error("Unexpected response type");
     return block.text;
@@ -300,9 +328,10 @@ export async function councilAnalyze(
     if (result.status === "fulfilled") {
       votes.push(result.value);
     } else {
-      const errMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
-      console.error(`[Council] ${available[i].name} analysis failed: ${errMsg}`);
-      failed.push({ model: available[i].name, error: errMsg });
+      // Log the full error for debugging, expose only sanitized version to users
+      const rawMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      console.error(`[Council] ${available[i].name} analysis failed: ${rawMsg}`);
+      failed.push({ model: available[i].name, error: sanitizeProviderError(result.reason) });
     }
   });
 
@@ -346,9 +375,9 @@ export async function councilCritique(
     if (result.status === "fulfilled") {
       opinions.push(result.value);
     } else {
-      const errMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
-      console.error(`[Council] ${available[i].name} critique failed: ${errMsg}`);
-      failed.push({ model: available[i].name, error: errMsg });
+      const rawMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      console.error(`[Council] ${available[i].name} critique failed: ${rawMsg}`);
+      failed.push({ model: available[i].name, error: sanitizeProviderError(result.reason) });
     }
   });
 

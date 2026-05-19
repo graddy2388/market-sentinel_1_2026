@@ -1,4 +1,4 @@
-import { fetch24hr } from "./coingecko.js";
+import { fetch24hr } from "./providers.js";
 import { cache } from "./cache.js";
 
 const POLL_INTERVAL_MS = 15_000; // 15 seconds
