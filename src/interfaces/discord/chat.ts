@@ -61,9 +61,20 @@ export type QuestionDepth = "quick" | "deep";
 export function detectQuestionDepth(text: string): QuestionDepth {
   const lower = text.toLowerCase().trim();
 
-  // Explicit requests for brevity → quick
+  // Explicit requests for brevity → quick (always honored)
   if (/\b(one word|1 word|quick|short|brief|tldr|tl;dr|simple|just tell me)\b/i.test(lower)) {
     return "quick";
+  }
+
+  // Trade proposals always get the full council treatment — check BEFORE
+  // the length heuristic so "should I sell BTC at 70k?" isn't shortcut to quick
+  if (isTradeProposal(text)) {
+    return "deep";
+  }
+
+  // Explicit requests for depth → deep
+  if (/\b(analy[sz]e|breakdown|technicals|full|detailed|deep dive|in.?depth|signals|indicators|compare)\b/i.test(lower)) {
+    return "deep";
   }
 
   // "Buy or sell?" / "bull or bear?" style questions → quick
@@ -75,16 +86,6 @@ export function detectQuestionDepth(text: string): QuestionDepth {
   // e.g. "is BTC a buy?" "how's ETH?" "XRP thoughts?"
   if (lower.length < 60) {
     return "quick";
-  }
-
-  // Explicit requests for depth → deep
-  if (/\b(analy[sz]e|breakdown|technicals|full|detailed|deep dive|in.?depth|signals|indicators|compare)\b/i.test(lower)) {
-    return "deep";
-  }
-
-  // Trade proposals always get the full council treatment
-  if (isTradeProposal(text)) {
-    return "deep";
   }
 
   // Default: if the message is moderately long, go deep; otherwise quick
@@ -135,8 +136,8 @@ function findUnknownTickers(text: string, knownSymbols: string[]): string[] {
  */
 function isTradeProposal(text: string): boolean {
   const patterns = [
-    /\b(should i|thinking about|planning to|gonna|going to|want to)\b.*\b(buy|sell|long|short|enter|exit|trade|swap|dca|ape)\b/i,
-    /\b(buy|sell|long|short|enter|exit|trade|swap|dca|ape)\b.*\b(good idea|bad idea|smart|dumb|worth|risky)\b/i,
+    /\b(should i|thinking about|planning to|gonna|going to|want to)\b.*\b(buy|buying|sell|selling|long|longing|short|shorting|enter|exit|trade|trading|swap|dca|ape)\b/i,
+    /\b(buy|buying|sell|selling|long|short|enter|exit|trade|trading|swap|dca|ape)\b.*\b(good idea|bad idea|smart|dumb|worth|risky)\b/i,
     /\b(critique|review|rate|evaluate)\b.*\b(trade|position|entry|plan)\b/i,
   ];
   return patterns.some((p) => p.test(text));

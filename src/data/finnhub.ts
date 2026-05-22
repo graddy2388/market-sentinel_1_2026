@@ -118,7 +118,7 @@ export async function fetchStockCandles(
       t?: number[];    // timestamps (unix seconds)
     };
 
-    if (data.s !== "ok" || !data.t || !data.o || !data.c) return [];
+    if (data.s !== "ok" || !data.t || !data.o || !data.h || !data.l || !data.c) return [];
 
     const candles: Candle[] = [];
     const count = Math.min(data.t.length, limit);

@@ -83,6 +83,20 @@ describe("detectQuestionDepth", () => {
     expect(detectQuestionDepth(long)).toBe("deep");
   });
 
+  // ── Trade proposals → deep (even when short) ──
+
+  it("detects short trade proposals as deep", () => {
+    expect(detectQuestionDepth("should I sell BTC at 70k?")).toBe("deep");
+  });
+
+  it("detects 'thinking about buying' as deep", () => {
+    expect(detectQuestionDepth("thinking about buying ETH here")).toBe("deep");
+  });
+
+  it("detects 'is this trade a good idea' as deep", () => {
+    expect(detectQuestionDepth("planning to long SOL, good idea?")).toBe("deep");
+  });
+
   // ── Edge cases ──
 
   it("treats moderate-length general questions as quick", () => {

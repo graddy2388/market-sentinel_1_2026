@@ -13,11 +13,11 @@ import type { TechnicalSummary, SignalDirection } from "../../analysis/types.js"
 // Configuration
 // ---------------------------------------------------------------------------
 
-/** Hour of the day (0-23) to post the briefing. Defaults to 8 (8 AM). */
-const BRIEFING_HOUR = parseInt(process.env.BRIEFING_HOUR ?? "8", 10);
+/** Hour of the day (0-23) to post the briefing. Uses validated config. */
+const BRIEFING_HOUR = appConfig.BRIEFING_HOUR;
 
-/** Timezone offset in hours from UTC (e.g., -4 for EDT). Defaults to -4. */
-const BRIEFING_TZ_OFFSET = parseInt(process.env.BRIEFING_TZ_OFFSET ?? "-4", 10);
+/** Timezone offset in hours from UTC (e.g., -4 for EDT). Uses validated config. */
+const BRIEFING_TZ_OFFSET = appConfig.BRIEFING_TZ_OFFSET;
 
 // ---------------------------------------------------------------------------
 // Internals
@@ -115,21 +115,22 @@ async function getPositionSummaries(): Promise<PositionSummary[]> {
     const rows = db.select().from(positions).all();
     if (rows.length === 0) return [];
 
-    const summaries: PositionSummary[] = [];
-    for (const pos of rows) {
-      const overview = await fetch24hrCached(pos.symbol);
-      const currentPrice = overview?.price ?? null;
-      const pnlPercent = currentPrice != null
-        ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
-        : null;
-      summaries.push({
-        symbol: pos.symbol,
-        quantity: pos.quantity,
-        entryPrice: pos.entryPrice,
-        currentPrice,
-        pnlPercent,
-      });
-    }
+    const summaries = await Promise.all(
+      rows.map(async (pos) => {
+        const overview = await fetch24hrCached(pos.symbol);
+        const currentPrice = overview?.price ?? null;
+        const pnlPercent = currentPrice != null
+          ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+          : null;
+        return {
+          symbol: pos.symbol,
+          quantity: pos.quantity,
+          entryPrice: pos.entryPrice,
+          currentPrice,
+          pnlPercent,
+        };
+      })
+    );
     return summaries;
   } catch {
     return [];
