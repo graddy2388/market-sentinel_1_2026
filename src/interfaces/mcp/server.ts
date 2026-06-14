@@ -11,9 +11,10 @@ import { startPoller, stopPoller } from "../../data/poller.js";
 import { DataManager } from "../../data/manager.js";
 import { startSignalMonitor, stopSignalMonitor } from "../../signals/monitor.js";
 import { bus } from "../../events/bus.js";
+import { handleDashboardRequest } from "../web/dashboard.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
-import { hasAnyAI, hasDiscord } from "../../config.js";
+import { hasAnyAI, hasDiscord, hasDashboard } from "../../config.js";
 import { getDb, saveDb, closeDb } from "../../state/db.js";
 import { watchlist, positions, alerts } from "../../state/schema.js";
 import { eq } from "drizzle-orm";
@@ -460,6 +461,11 @@ async function startHttp() {
       return;
     }
 
+    // --- Web dashboard (/dashboard, /api/*, /events) — no-op if disabled ---
+    if (await handleDashboardRequest(req, res, url)) {
+      return;
+    }
+
     // --- MCP endpoint ---
     if (url.pathname === "/mcp") {
       const method = req.method?.toUpperCase();
@@ -577,6 +583,11 @@ async function startHttp() {
   httpServer.listen(MCP_PORT, MCP_HOST, async () => {
     console.log(`[Market Sentinel] MCP StreamableHTTP server listening on http://${MCP_HOST}:${MCP_PORT}/mcp`);
     console.log(`[Market Sentinel] Health check: http://${MCP_HOST}:${MCP_PORT}/health`);
+    if (hasDashboard()) {
+      console.log(`[Market Sentinel] Dashboard: http://${MCP_HOST}:${MCP_PORT}/dashboard?token=YOUR_TOKEN`);
+    } else {
+      console.log("[Market Sentinel] Dashboard disabled (set DASHBOARD_TOKEN to enable)");
+    }
 
     // Start Discord bot + alert engine if configured
     if (hasDiscord()) {

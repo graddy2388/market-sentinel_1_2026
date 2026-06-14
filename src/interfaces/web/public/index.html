@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Market Sentinel</title>
+  <link rel="stylesheet" href="/dashboard/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◆</span>
+      <span>Market Sentinel</span>
+    </div>
+    <div class="status">
+      <span id="conn-dot" class="dot dot-off"></span>
+      <span id="conn-label">connecting…</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="panel" id="watchlist-panel">
+      <h2>Watchlist</h2>
+      <div id="tiles" class="tiles"></div>
+    </section>
+
+    <section class="panel" id="signals-panel">
+      <h2>Signals</h2>
+      <div id="signals" class="signals"></div>
+    </section>
+
+    <section class="panel" id="portfolio-panel">
+      <h2>Portfolio</h2>
+      <div id="portfolio" class="portfolio"></div>
+    </section>
+
+    <section class="panel chat" id="chat-panel">
+      <h2>Ask Sentinel</h2>
+      <div id="chat-log" class="chat-log"></div>
+      <form id="chat-form" class="chat-form" autocomplete="off">
+        <input id="chat-input" type="text" placeholder="e.g. buy or sell BTC?  ·  analyze ETH" maxlength="2000" />
+        <button type="submit" id="chat-send">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Advisory signals only — not financial advice. Market Sentinel does not execute trades.
+  </footer>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

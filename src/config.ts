@@ -26,6 +26,10 @@ const configSchema = z.object({
   ALERT_COOLDOWN_MINUTES: z.coerce.number().default(15),
   BRIEFING_HOUR: z.coerce.number().min(0).max(23).default(8),
   BRIEFING_TZ_OFFSET: z.coerce.number().min(-12).max(14).default(-4),
+  // Web dashboard access token. When unset, the dashboard is disabled entirely
+  // (routes 404) so it can never be exposed unauthenticated. Min length guards
+  // against trivially guessable tokens.
+  DASHBOARD_TOKEN: z.string().min(16, "DASHBOARD_TOKEN must be at least 16 characters").optional(),
 });
 
 const parsed = configSchema.safeParse(process.env);
@@ -91,6 +95,10 @@ export function hasAnyAI(): boolean {
 
 export function hasDiscord(): boolean {
   return !!appConfig.DISCORD_BOT_TOKEN;
+}
+
+export function hasDashboard(): boolean {
+  return !!appConfig.DASHBOARD_TOKEN;
 }
 
 export function requireAI(): void {
