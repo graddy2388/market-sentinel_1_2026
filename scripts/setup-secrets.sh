@@ -1,73 +1,57 @@
 #!/usr/bin/env bash
-# setup-secrets.sh — Generate secrets.env on the Docker host from 1Password
+# setup-secrets.sh — Install the 1Password service-account token on the host.
 #
-# Run this ON the Docker host (192.168.4.32) before deploying the stack.
-# Requires: 1Password CLI (op) authenticated via `op signin` or a service account.
+# Market Sentinel no longer stores vendor API keys on the host. Instead it
+# resolves op:// references (see docker-compose.yml) at startup using a single
+# 1Password service-account token. This script installs only that token, with
+# locked-down permissions, as the file Compose mounts at /run/secrets/op_token.
 #
-# Usage:
-#   ./scripts/setup-secrets.sh              # Interactive (uses op inject)
-#   ./scripts/setup-secrets.sh --manual     # Creates blank secrets.env for manual editing
+# Prerequisites (one-time, in your 1Password account):
+#   1. Create a vault, e.g. "market-sentinel".
+#   2. Add an item per provider with the API key in a field named "credential",
+#      matching the op:// references in docker-compose.yml, e.g.:
+#        op://market-sentinel/openai/credential
+#        op://market-sentinel/anthropic/credential
+#        op://market-sentinel/discord-bot/credential   (Discord bot token)
+#        ...gemini, groq, cohere, mistral, deepseek, finnhub, goldapi, dashboard
+#   3. Create a SERVICE ACCOUNT scoped to read that vault and copy its token
+#      (starts with "ops_").
+#
+# Usage (run ON the Docker host):
+#   ./scripts/setup-secrets.sh                 # prompts for the token (no echo)
+#   OP_TOKEN=ops_... ./scripts/setup-secrets.sh  # non-interactive
 
 set -euo pipefail
 
 SECRETS_DIR="/opt/market-sentinel"
-SECRETS_FILE="${SECRETS_DIR}/secrets.env"
-TEMPLATE="secrets.env.tpl"
+TOKEN_FILE="${SECRETS_DIR}/op_token"
 
-echo "[setup] Target: ${SECRETS_FILE}"
-
-# Ensure directory exists
+echo "[setup] Target: ${TOKEN_FILE}"
 sudo mkdir -p "${SECRETS_DIR}"
 
-if [[ "${1:-}" == "--manual" ]]; then
-  # Create a blank secrets file for manual editing
-  if [[ -f "${SECRETS_FILE}" ]]; then
-    echo "[setup] ${SECRETS_FILE} already exists. Edit it directly."
-  else
-    cat > /tmp/secrets.env.tmp <<'ENVEOF'
-# Market Sentinel Secrets
-# Fill in the keys you have, leave the rest blank.
-
-# AI Council (at least one required)
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-GEMINI_API_KEY=
-GROQ_API_KEY=
-COHERE_API_KEY=
-MISTRAL_API_KEY=
-DEEPSEEK_API_KEY=
-
-# Discord bot
-DISCORD_BOT_TOKEN=
-DISCORD_CHANNEL_ID=
-ENVEOF
-    sudo mv /tmp/secrets.env.tmp "${SECRETS_FILE}"
-    echo "[setup] Created blank ${SECRETS_FILE} — edit it with your API keys."
-  fi
-else
-  # Inject from 1Password
-  if ! command -v op &> /dev/null; then
-    echo "[setup] ERROR: 1Password CLI (op) not found."
-    echo "  Install: https://developer.1password.com/docs/cli/get-started/"
-    echo "  Or use: $0 --manual"
-    exit 1
-  fi
-
-  if [[ ! -f "${TEMPLATE}" ]]; then
-    echo "[setup] ERROR: Template not found at ${TEMPLATE}"
-    echo "  Run this from the project root, or copy secrets.env.tpl to the Docker host."
-    exit 1
-  fi
-
-  echo "[setup] Injecting secrets from 1Password..."
-  op inject -i "${TEMPLATE}" -o /tmp/secrets.env.tmp
-  sudo mv /tmp/secrets.env.tmp "${SECRETS_FILE}"
-  echo "[setup] Secrets injected successfully."
+TOKEN="${OP_TOKEN:-}"
+if [[ -z "${TOKEN}" ]]; then
+  read -rsp "Paste the 1Password service-account token (ops_...): " TOKEN
+  echo
 fi
 
-# Lock down permissions — readable only by root and the docker group
-sudo chown root:docker "${SECRETS_FILE}"
-sudo chmod 640 "${SECRETS_FILE}"
+if [[ -z "${TOKEN}" ]]; then
+  echo "[setup] ERROR: no token provided." >&2
+  exit 1
+fi
+if [[ "${TOKEN}" != ops_* ]]; then
+  echo "[setup] WARNING: token does not start with 'ops_' — continuing anyway." >&2
+fi
 
-echo "[setup] Permissions: $(ls -la "${SECRETS_FILE}")"
-echo "[setup] Done. Deploy or redeploy the stack in Portainer."
+# Write without leaving the token in shell history or world-readable temp files.
+umask 077
+printf '%s' "${TOKEN}" | sudo tee "${TOKEN_FILE}" > /dev/null
+
+# Readable only by root and the docker group.
+sudo chown root:docker "${TOKEN_FILE}"
+sudo chmod 640 "${TOKEN_FILE}"
+
+echo "[setup] Installed: $(ls -la "${TOKEN_FILE}")"
+echo "[setup] Done. Redeploy the stack in Portainer to pick up the token."
+echo "[setup] Verify afterwards:  docker inspect market-sentinel --format '{{json .Config.Env}}'"
+echo "[setup]   → should show op:// references, never real API keys."

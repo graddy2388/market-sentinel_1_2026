@@ -6,13 +6,35 @@ services:
     ports:
       - "3100:3100"
     environment:
-      # Non-secret configuration only — secrets loaded from mounted .env
+      # --- Non-secret configuration ---
       - MCP_TRANSPORT=sse
       - MCP_PORT=3100
       - DB_PATH=/data/data.db
+      - DISCORD_CHANNEL_ID=1472746341653286944 # not secret
+
+      # --- 1Password secret resolution ---
+      # The app resolves these op:// references to real values at startup using
+      # the service-account token mounted at OP_TOKEN_FILE. These references are
+      # NOT secret — they are safe to appear in `docker inspect`.
+      - SECRETS_PROVIDER=onepassword
+      - OP_TOKEN_FILE=/run/secrets/op_token
+      - OPENAI_API_KEY=op://market-sentinel/openai/credential
+      - ANTHROPIC_API_KEY=op://market-sentinel/anthropic/credential
+      - DISCORD_BOT_TOKEN=op://market-sentinel/discord-bot/credential
+      # Free-tier council models (optional — remove any you don't use)
+      - GEMINI_API_KEY=op://market-sentinel/gemini/credential
+      - GROQ_API_KEY=op://market-sentinel/groq/credential
+      - COHERE_API_KEY=op://market-sentinel/cohere/credential
+      - MISTRAL_API_KEY=op://market-sentinel/mistral/credential
+      - DEEPSEEK_API_KEY=op://market-sentinel/deepseek/credential
+      # Market data (optional)
+      - FINNHUB_API_KEY=op://market-sentinel/finnhub/credential
+      - GOLDAPI_KEY=op://market-sentinel/goldapi/credential
+      # Web dashboard (optional — also keep this out of plaintext)
+      - DASHBOARD_TOKEN=op://market-sentinel/dashboard/credential
+    secrets:
+      - op_token
     volumes:
-      # Secrets file (API keys, Discord token) — see scripts/setup-secrets.sh
-      - /opt/market-sentinel/secrets.env:/app/.env:ro
       - sentinel-data:/data
     # Security hardening
     security_opt:
@@ -34,6 +56,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+# The only secret stored on the host is the 1Password service-account token.
+# Compose mounts it at /run/secrets/op_token (tmpfs), so it never appears in
+# `docker inspect`. Create it on the host with scripts/setup-secrets.sh.
+secrets:
+  op_token:
+    file: /opt/market-sentinel/op_token
 
 volumes:
   sentinel-data:

@@ -39,4 +39,4 @@ EXPOSE 3100
 
 USER appuser
 
-CMD ["node", "dist/interfaces/mcp/server.js"]
+CMD ["node", "dist/bootstrap.js"]
