@@ -60,3 +60,24 @@ export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+export const signalHistory = sqliteTable("signal_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  symbol: text("symbol").notNull(),
+  call: text("call", {
+    enum: ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"],
+  }).notNull(),
+  conviction: real("conviction").notNull(),
+  price: real("price").notNull(),
+  entry: real("entry").notNull(),
+  stop: real("stop").notNull(),
+  target: real("target").notNull(),
+  technicalDirection: text("technical_direction").notNull(),
+  aiDirection: text("ai_direction"),
+  agreement: integer("agreement", { mode: "boolean" }).notNull(),
+  // Full GradedSignal JSON for flexible reads (dashboard / embeds)
+  payload: text("payload").notNull(),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});

@@ -61,6 +61,25 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS signal_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL,
+  call TEXT NOT NULL CHECK(call IN ('STRONG_BUY', 'BUY', 'HOLD', 'SELL', 'STRONG_SELL')),
+  conviction REAL NOT NULL,
+  price REAL NOT NULL,
+  entry REAL NOT NULL,
+  stop REAL NOT NULL,
+  target REAL NOT NULL,
+  technical_direction TEXT NOT NULL,
+  ai_direction TEXT,
+  agreement INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_history_symbol_created
+  ON signal_history(symbol, created_at DESC);
 `;
 
 export async function getDb() {

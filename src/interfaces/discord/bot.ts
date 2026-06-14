@@ -7,10 +7,11 @@ import {
 } from "discord.js";
 import { appConfig } from "../../config.js";
 import { commands, handlePrice, handleAnalyze, handleAlerts, handleHelp } from "./commands.js";
-import { alertEmbed } from "./embeds.js";
+import { alertEmbed, signalEmbed } from "./embeds.js";
 import { handleChatMessage, handleImageMessage, type ChatResponse } from "./chat.js";
 import { startBriefingScheduler, stopBriefingScheduler } from "./briefing.js";
 import type { TriggeredAlert } from "../../alerts/engine.js";
+import type { GradedSignal } from "../../signals/scorer.js";
 
 let client: Client | null = null;
 let alertChannelId: string | null = null;
@@ -178,6 +179,22 @@ export async function sendAlertNotification(alert: TriggeredAlert, currentPrice:
     }
   } catch (err) {
     console.error("[Discord] Failed to send alert notification:", err);
+  }
+}
+
+export async function sendSignalNotification(signal: GradedSignal): Promise<void> {
+  // Silently no-op if Discord isn't configured (mirrors sendAlertNotification).
+  if (!client || !alertChannelId) return;
+
+  try {
+    const channel = await client.channels.fetch(alertChannelId);
+    if (channel && channel.isTextBased() && "send" in channel) {
+      await (channel as TextChannel).send({
+        embeds: [signalEmbed(signal)],
+      });
+    }
+  } catch (err) {
+    console.error("[Discord] Failed to send signal notification:", err);
   }
 }
 

@@ -5,6 +5,7 @@ import { isFinnhubAvailable } from "../../data/finnhub.js";
 import type { MarketOverview } from "../../data/types.js";
 import type { TechnicalSummary, SignalDirection } from "../../analysis/types.js";
 import type { TriggeredAlert } from "../../alerts/engine.js";
+import type { GradedSignal, SignalCall } from "../../signals/scorer.js";
 
 const COLOR_GREEN = 0x2ecc71;
 const COLOR_RED = 0xe74c3c;
@@ -212,5 +213,47 @@ export function helpEmbed(): EmbedBuilder {
       },
     )
     .setFooter({ text: "Market Sentinel" })
+    .setTimestamp();
+}
+
+function signalCallColor(call: SignalCall): number {
+  if (call === "STRONG_BUY" || call === "BUY") return COLOR_GREEN;
+  if (call === "STRONG_SELL" || call === "SELL") return COLOR_RED;
+  return COLOR_YELLOW;
+}
+
+function signalCallEmoji(call: SignalCall): string {
+  switch (call) {
+    case "STRONG_BUY": return "🟢🟢";
+    case "BUY": return "🟢";
+    case "SELL": return "🔴";
+    case "STRONG_SELL": return "🔴🔴";
+    default: return "⚪";
+  }
+}
+
+export function signalEmbed(signal: GradedSignal): EmbedBuilder {
+  const label = signal.call.replace("_", " ");
+  const emoji = signalCallEmoji(signal.call);
+
+  return new EmbedBuilder()
+    .setTitle(`${emoji} ${signal.symbol} — ${label}`)
+    .setColor(signalCallColor(signal.call))
+    .setDescription(signal.rationale)
+    .addFields(
+      { name: "Conviction", value: `${(signal.conviction * 100).toFixed(0)}%`, inline: true },
+      { name: "Price", value: formatUsd(signal.price), inline: true },
+      { name: "Entry", value: formatUsd(signal.entry), inline: true },
+      { name: "Stop", value: formatUsd(signal.stop), inline: true },
+      { name: "Target", value: formatUsd(signal.target), inline: true },
+      {
+        name: "Source",
+        value: signal.components.ai
+          ? `Technical ${signal.components.technical} + AI ${signal.components.ai}${signal.components.agreement ? " (agree)" : " (mixed)"}`
+          : `Technical ${signal.components.technical} (AI unavailable)`,
+        inline: false,
+      },
+    )
+    .setFooter({ text: "Market Sentinel Signal Engine — advisory only, not financial advice" })
     .setTimestamp();
 }
