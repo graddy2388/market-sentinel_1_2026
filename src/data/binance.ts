@@ -2,7 +2,9 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import type { Tick, Candle, CandleInterval } from "./types.js";
 
-const BINANCE_WS_BASE = "wss://stream.binance.com:9443/ws";
+// Combined-stream endpoint. Multi-stream subscriptions must use /stream?streams=
+// (not /ws/<a>/<b>), and their frames are wrapped as { stream, data }.
+const BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream?streams=";
 
 interface BinanceTickerMsg {
   e: "24hrTicker";
@@ -46,7 +48,7 @@ export class BinanceDataSource extends EventEmitter {
       `${s}usdt@ticker`,
       `${s}usdt@kline_1m`,
     ]);
-    const url = `${BINANCE_WS_BASE}/${streams.join("/")}`;
+    const url = `${BINANCE_WS_BASE}${streams.join("/")}`;
 
     this.ws = new WebSocket(url);
 
@@ -56,7 +58,10 @@ export class BinanceDataSource extends EventEmitter {
 
     this.ws.on("message", (raw: Buffer) => {
       try {
-        const data = JSON.parse(raw.toString());
+        const parsed = JSON.parse(raw.toString());
+        // Combined-stream frames wrap the payload as { stream, data };
+        // fall back to the raw object for single-stream frames.
+        const data = parsed.data ?? parsed;
         if (data.e === "24hrTicker") {
           this.handleTicker(data as BinanceTickerMsg);
         } else if (data.e === "kline") {

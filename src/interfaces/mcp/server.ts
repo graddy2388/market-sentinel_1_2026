@@ -8,6 +8,9 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { fetch24hrCached, fetchCandlesCached } from "../../data/providers.js";
 import { startPoller, stopPoller } from "../../data/poller.js";
+import { DataManager } from "../../data/manager.js";
+import { startSignalMonitor, stopSignalMonitor } from "../../signals/monitor.js";
+import { bus } from "../../events/bus.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
 import { hasAnyAI, hasDiscord } from "../../config.js";
@@ -302,6 +305,10 @@ function createMcpServer(): McpServer {
 const MCP_TRANSPORT = process.env.MCP_TRANSPORT ?? "stdio";
 const MCP_PORT = parseInt(process.env.MCP_PORT ?? "3100", 10);
 
+// Live data manager (Binance WebSocket) — activated in startHttp when the
+// watchlist contains crypto symbols.
+let dataManager: DataManager | null = null;
+
 async function startStdio() {
   const server = createMcpServer();
   const transport = new StdioServerTransport();
@@ -370,7 +377,8 @@ const MAX_SESSIONS = 100;              // cap concurrent sessions
 const sessionLastSeen = new Map<string, number>();
 
 async function startHttp() {
-  // Start background poller with symbols from the DB watchlist
+  // Start background poller with symbols from the DB watchlist, and activate
+  // the live Binance WebSocket + reactive signal monitor for crypto symbols.
   try {
     const db = await getDb();
     const items = db.select().from(watchlist).all();
@@ -380,8 +388,33 @@ async function startHttp() {
     } else {
       console.log("[Market Sentinel] Watchlist is empty — poller not started. Add symbols via manage-watchlist.");
     }
+
+    // Live streaming is crypto-only (Binance). Use the actual crypto watchlist
+    // rows — NOT every known crypto symbol — so we don't subscribe to
+    // stablecoins or symbols without a Binance USDT pair.
+    const cryptoWatchlist = items
+      .filter((row) => row.market === "crypto")
+      .map((row) => row.symbol.toUpperCase());
+    if (cryptoWatchlist.length > 0) {
+      dataManager = new DataManager(cryptoWatchlist);
+      dataManager.on("connected", () => console.log("[Market Sentinel] Binance stream connected"));
+      dataManager.on("disconnected", () => console.log("[Market Sentinel] Binance stream disconnected"));
+      dataManager.on("error", (err: Error) => console.error("[Market Sentinel] Binance stream error:", err.message));
+      dataManager.start();
+      startSignalMonitor(dataManager);
+      // Push graded-signal changes to Discord when configured.
+      if (hasDiscord()) {
+        const { sendSignalNotification } = await import("../discord/bot.js");
+        bus.onSignal((signal) => {
+          sendSignalNotification(signal).catch((err) =>
+            console.error("[Market Sentinel] Signal notification error:", err)
+          );
+        });
+      }
+      console.log(`[Market Sentinel] Live signal monitor active for: ${cryptoWatchlist.join(", ")}`);
+    }
   } catch (err) {
-    console.warn("[Market Sentinel] Could not read watchlist for poller:", err);
+    console.warn("[Market Sentinel] Could not read watchlist for poller/monitor:", err);
   }
 
   const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -568,6 +601,11 @@ async function startHttp() {
   const shutdown = async () => {
     console.log("[Market Sentinel] Shutting down...");
     stopPoller();
+    stopSignalMonitor();
+    if (dataManager) {
+      dataManager.stop();
+      dataManager = null;
+    }
 
     if (hasDiscord()) {
       try {
