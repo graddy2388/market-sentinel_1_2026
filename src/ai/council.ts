@@ -21,6 +21,20 @@ import type { TechnicalSummary } from "../analysis/types.js";
 /** Per-model timeout for API calls (30 seconds). */
 const AI_CALL_TIMEOUT_MS = 30_000;
 
+/**
+ * Soft deadline for the council as a whole. Once this passes AND a majority of
+ * models have answered, we stop waiting for stragglers — the slowest model no
+ * longer gates the reply. Models that miss the cutoff are reported as dropped.
+ */
+export const COUNCIL_SOFT_DEADLINE_MS = 10_000;
+
+/**
+ * Max output tokens per council response. The JSON schema needs ~200-400
+ * tokens; generation time scales with output length, so keeping this tight is
+ * a direct latency win (display truncates long reasoning anyway).
+ */
+const COUNCIL_MAX_TOKENS = 600;
+
 interface AIProvider {
   name: string;
   available(): boolean;
@@ -28,9 +42,84 @@ interface AIProvider {
   critique(prompt: string): Promise<CritiqueResponse>;
 }
 
-function parseJson<T>(raw: string, schema: { parse: (v: unknown) => T }): T {
-  const cleaned = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-  return schema.parse(JSON.parse(cleaned));
+/**
+ * Parse a model's JSON reply robustly:
+ * 1. strip markdown code fences,
+ * 2. try a direct parse,
+ * 3. fall back to extracting the outermost {...} block (models sometimes wrap
+ *    the JSON in prose despite instructions).
+ */
+export function parseJson<T>(raw: string, schema: { parse: (v: unknown) => T }): T {
+  const cleaned = raw.replace(/```json\n?/gi, "").replace(/```\n?/g, "").trim();
+  try {
+    return schema.parse(JSON.parse(cleaned));
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start === -1 || end <= start) {
+      throw new Error("No JSON object found in model response");
+    }
+    return schema.parse(JSON.parse(cleaned.slice(start, end + 1)));
+  }
+}
+
+/**
+ * Settle a set of promises with an early-exit quorum:
+ * - resolves when ALL tasks settle, or
+ * - once the soft deadline has passed AND at least ceil(n/2) have fulfilled.
+ * Tasks still pending at resolution are returned as null (dropped).
+ * Handlers are attached to every task up front, so late settlement after an
+ * early exit never becomes an unhandled rejection.
+ */
+export function settleWithQuorum<T>(
+  tasks: Promise<T>[],
+  softDeadlineMs: number = COUNCIL_SOFT_DEADLINE_MS
+): Promise<Array<PromiseSettledResult<T> | null>> {
+  if (tasks.length === 0) return Promise.resolve([]);
+  const quorum = Math.ceil(tasks.length / 2);
+
+  return new Promise((resolve) => {
+    const results: Array<PromiseSettledResult<T> | null> = new Array(tasks.length).fill(null);
+    let settledCount = 0;
+    let fulfilledCount = 0;
+    let deadlinePassed = false;
+    let done = false;
+
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(results.slice());
+    };
+
+    const maybeFinishEarly = () => {
+      if (deadlinePassed && fulfilledCount >= quorum) finish();
+    };
+
+    const timer = setTimeout(() => {
+      deadlinePassed = true;
+      maybeFinishEarly();
+    }, softDeadlineMs);
+    timer.unref?.();
+
+    tasks.forEach((task, i) => {
+      task
+        .then(
+          (value) => {
+            results[i] = { status: "fulfilled", value };
+            fulfilledCount++;
+          },
+          (reason) => {
+            results[i] = { status: "rejected", reason };
+          }
+        )
+        .then(() => {
+          settledCount++;
+          if (settledCount === tasks.length) finish();
+          else maybeFinishEarly();
+        });
+    });
+  });
 }
 
 /**
@@ -79,7 +168,7 @@ function createOAIProvider(
         model,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.3,
-        max_tokens: 1000,
+        max_tokens: COUNCIL_MAX_TOKENS,
       },
       { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
     );
@@ -117,7 +206,7 @@ function createClaudeProvider(): AIProvider {
     const res = await getClient().messages.create(
       {
         model: "claude-sonnet-4-6",
-        max_tokens: 1000,
+        max_tokens: COUNCIL_MAX_TOKENS,
         messages: [{ role: "user", content: prompt }],
       },
       { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
@@ -314,7 +403,8 @@ export async function councilAnalyze(
   const prompt = buildAnalysisPrompt(symbol, technicals);
   const available = getAvailableProviders();
 
-  const results = await Promise.allSettled(
+  // Early-exit quorum: don't let one slow model gate the whole reply.
+  const results = await settleWithQuorum(
     available.map(async (provider): Promise<ModelVote> => {
       const analysis = await provider.analyze(prompt);
       return { model: provider.name, analysis };
@@ -325,7 +415,10 @@ export async function councilAnalyze(
   const failed: ModelError[] = [];
 
   results.forEach((result, i) => {
-    if (result.status === "fulfilled") {
+    if (result === null) {
+      console.warn(`[Council] ${available[i].name} analysis dropped (no response within ${COUNCIL_SOFT_DEADLINE_MS / 1000}s)`);
+      failed.push({ model: available[i].name, error: "too slow — dropped" });
+    } else if (result.status === "fulfilled") {
       votes.push(result.value);
     } else {
       // Log the full error for debugging, expose only sanitized version to users
@@ -361,7 +454,8 @@ export async function councilCritique(
   const prompt = buildCritiquePrompt(tradeDescription, technicals);
   const available = getAvailableProviders();
 
-  const results = await Promise.allSettled(
+  // Early-exit quorum: don't let one slow model gate the whole reply.
+  const results = await settleWithQuorum(
     available.map(async (provider): Promise<ModelCritique> => {
       const critique = await provider.critique(prompt);
       return { model: provider.name, critique };
@@ -372,7 +466,10 @@ export async function councilCritique(
   const failed: ModelError[] = [];
 
   results.forEach((result, i) => {
-    if (result.status === "fulfilled") {
+    if (result === null) {
+      console.warn(`[Council] ${available[i].name} critique dropped (no response within ${COUNCIL_SOFT_DEADLINE_MS / 1000}s)`);
+      failed.push({ model: available[i].name, error: "too slow — dropped" });
+    } else if (result.status === "fulfilled") {
       opinions.push(result.value);
     } else {
       const rawMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);

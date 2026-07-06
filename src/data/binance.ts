@@ -2,9 +2,77 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import type { Tick, Candle, CandleInterval } from "./types.js";
 
-// Combined-stream endpoint. Multi-stream subscriptions must use /stream?streams=
-// (not /ws/<a>/<b>), and their frames are wrapped as { stream, data }.
-const BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream?streams=";
+// ---------------------------------------------------------------------------
+// Host resolution — binance.com geo-blocks US IPs (HTTP 451), binance.us
+// serves the identical API shape for US users. Probe once per process, prefer
+// an explicit BINANCE_BASE_URL override, and cache the working host. A failed
+// probe is re-tried after a cooldown so a transient outage isn't permanent.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_REST_HOSTS = ["https://api.binance.com", "https://api.binance.us"];
+const REST_HOSTS = process.env.BINANCE_BASE_URL
+  ? [process.env.BINANCE_BASE_URL.replace(/\/$/, ""), ...DEFAULT_REST_HOSTS]
+  : DEFAULT_REST_HOSTS;
+
+const PROBE_TIMEOUT_MS = 4_000;
+const FAILED_PROBE_COOLDOWN_MS = 5 * 60_000; // don't re-probe every call when all hosts are down
+
+let resolvedHost: string | null = null;
+let lastFailedProbeAt = 0;
+let inFlightProbe: Promise<string | null> | null = null;
+
+/**
+ * Resolve the first reachable Binance REST host, caching the result for the
+ * process lifetime. Concurrent callers share one in-flight probe. Returns null
+ * when no host is reachable (callers fall back to CoinGecko).
+ */
+export function resolveBinanceHost(): Promise<string | null> {
+  if (resolvedHost) return Promise.resolve(resolvedHost);
+  if (Date.now() - lastFailedProbeAt < FAILED_PROBE_COOLDOWN_MS) return Promise.resolve(null);
+  if (inFlightProbe) return inFlightProbe;
+
+  inFlightProbe = (async () => {
+    try {
+      for (const host of REST_HOSTS) {
+        try {
+          const res = await fetch(`${host}/api/v3/ping`, {
+            signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+          });
+          if (res.ok) {
+            resolvedHost = host;
+            console.log(`[Binance] Using ${host}`);
+            return host;
+          }
+          // Non-OK (e.g. 451 geo-block) — try the next host.
+        } catch {
+          // Network error / timeout — try the next host.
+        }
+      }
+      lastFailedProbeAt = Date.now();
+      console.warn("[Binance] No reachable Binance host — crypto data will use CoinGecko fallback");
+      return null;
+    } finally {
+      inFlightProbe = null;
+    }
+  })();
+
+  return inFlightProbe;
+}
+
+/** Test helper: reset cached host resolution. */
+export function _resetBinanceHost(): void {
+  resolvedHost = null;
+  lastFailedProbeAt = 0;
+  inFlightProbe = null;
+}
+
+/** Map a REST host to its matching combined-stream WebSocket base. */
+function wsBaseFor(host: string): string {
+  // Combined streams must use /stream?streams= (frames wrapped as {stream,data}).
+  return host.includes("binance.us")
+    ? "wss://stream.binance.us:9443/stream?streams="
+    : "wss://stream.binance.com:9443/stream?streams=";
+}
 
 interface BinanceTickerMsg {
   e: "24hrTicker";
@@ -44,11 +112,27 @@ export class BinanceDataSource extends EventEmitter {
   }
 
   connect(): void {
+    void this.connectAsync();
+  }
+
+  private async connectAsync(): Promise<void> {
+    // Resolve the reachable host first (binance.com is geo-blocked in the US;
+    // binance.us serves the same WS scheme). If nothing is reachable, retry
+    // later instead of hammering a blocked endpoint.
+    const host = await resolveBinanceHost();
+    if (!host) {
+      this.emit("error", new Error("No reachable Binance host"), "binance");
+      if (this.shouldReconnect) {
+        this.reconnectTimer = setTimeout(() => this.connect(), 60_000);
+      }
+      return;
+    }
+
     const streams = this.symbols.flatMap((s) => [
       `${s}usdt@ticker`,
       `${s}usdt@kline_1m`,
     ]);
-    const url = `${BINANCE_WS_BASE}${streams.join("/")}`;
+    const url = `${wsBaseFor(host)}${streams.join("/")}`;
 
     this.ws = new WebSocket(url);
 
@@ -122,10 +206,12 @@ export class BinanceDataSource extends EventEmitter {
 }
 
 export async function fetchBinancePrice(symbol: string): Promise<Tick | null> {
+  const host = await resolveBinanceHost();
+  if (!host) return null;
   const pair = `${symbol.toUpperCase()}USDT`;
-  const url = `https://api.binance.com/api/v3/ticker/price?symbol=${pair}`;
+  const url = `${host}/api/v3/ticker/price?symbol=${pair}`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return null;
     const data = (await res.json()) as { symbol: string; price: string };
     return {
@@ -147,19 +233,23 @@ export async function fetchBinance24hr(
   change: number;
   changePercent: number;
   volume: number;
+  quoteVolume: number;
   high: number;
   low: number;
 } | null> {
+  const host = await resolveBinanceHost();
+  if (!host) return null;
   const pair = `${symbol.toUpperCase()}USDT`;
-  const url = `https://api.binance.com/api/v3/ticker/24hr?symbol=${pair}`;
+  const url = `${host}/api/v3/ticker/24hr?symbol=${pair}`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return null;
     const data = (await res.json()) as {
       lastPrice: string;
       priceChange: string;
       priceChangePercent: string;
       volume: string;
+      quoteVolume: string;
       highPrice: string;
       lowPrice: string;
     };
@@ -167,7 +257,10 @@ export async function fetchBinance24hr(
       price: parseFloat(data.lastPrice),
       change: parseFloat(data.priceChange),
       changePercent: parseFloat(data.priceChangePercent),
+      // `volume` is in base units (e.g. BTC); `quoteVolume` is in USDT —
+      // callers displaying "$" volume want quoteVolume.
       volume: parseFloat(data.volume),
+      quoteVolume: parseFloat(data.quoteVolume),
       high: parseFloat(data.highPrice),
       low: parseFloat(data.lowPrice),
     };
@@ -181,10 +274,12 @@ export async function fetchBinanceKlines(
   interval: CandleInterval = "1h",
   limit = 100
 ): Promise<Candle[]> {
+  const host = await resolveBinanceHost();
+  if (!host) return [];
   const pair = `${symbol.toUpperCase()}USDT`;
-  const url = `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${interval}&limit=${limit}`;
+  const url = `${host}/api/v3/klines?symbol=${pair}&interval=${interval}&limit=${limit}`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
     if (!res.ok) return [];
     const data = (await res.json()) as (string | number)[][];
     return data.map((k) => ({

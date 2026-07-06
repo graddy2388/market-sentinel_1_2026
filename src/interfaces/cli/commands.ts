@@ -82,7 +82,7 @@ export function registerCommands(program: Command): void {
       }
       const intResult = intervalSchema.safeParse(opts.interval);
       if (!intResult.success) {
-        console.error(`Invalid interval: must be one of 1m, 5m, 15m, 1h, 4h, 1d`);
+        console.error(`Invalid interval: must be one of 1m, 5m, 15m, 30m, 1h, 4h, 1d`);
         return;
       }
       const candleResult = candlesSchema.safeParse(opts.candles);

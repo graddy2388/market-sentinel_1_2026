@@ -48,6 +48,7 @@ describe("intervalSchema", () => {
     expect(intervalSchema.parse("1m")).toBe("1m");
     expect(intervalSchema.parse("5m")).toBe("5m");
     expect(intervalSchema.parse("15m")).toBe("15m");
+    expect(intervalSchema.parse("30m")).toBe("30m");
     expect(intervalSchema.parse("1h")).toBe("1h");
     expect(intervalSchema.parse("4h")).toBe("4h");
     expect(intervalSchema.parse("1d")).toBe("1d");
@@ -57,7 +58,7 @@ describe("intervalSchema", () => {
     expect(() => intervalSchema.parse("2h")).toThrow();
     expect(() => intervalSchema.parse("1w")).toThrow();
     expect(() => intervalSchema.parse("")).toThrow();
-    expect(() => intervalSchema.parse("30m")).toThrow();
+    expect(() => intervalSchema.parse("45m")).toThrow();
   });
 });
 

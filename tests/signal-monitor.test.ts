@@ -21,15 +21,9 @@ const candles: Candle[] = Array.from({ length: 20 }, (_, i) => ({
   interval: "1h" as const,
 }));
 
-vi.mock("../src/data/binance.js", () => ({
-  fetchBinanceKlines: vi.fn(async () => candles),
-}));
-
-vi.mock("../src/data/cache.js", () => ({
-  cache: {
-    getCandles: vi.fn(() => null),
-    setCandles: vi.fn(),
-  },
+const fetchCandlesCachedMock = vi.fn(async () => candles);
+vi.mock("../src/data/providers.js", () => ({
+  fetchCandlesCached: (...args: unknown[]) => fetchCandlesCachedMock(...args),
 }));
 
 let mockTechnical: TechnicalSummary;
@@ -170,8 +164,7 @@ describe("evaluateSymbol", () => {
   });
 
   it("skips when not enough candles", async () => {
-    const { fetchBinanceKlines } = await import("../src/data/binance.js");
-    (fetchBinanceKlines as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    fetchCandlesCachedMock.mockResolvedValueOnce([]);
     const result = await evaluateSymbol("BTC");
     expect(result).toBeNull();
     expect(insertSignalMock).not.toHaveBeenCalled();

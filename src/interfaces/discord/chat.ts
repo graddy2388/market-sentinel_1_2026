@@ -8,6 +8,7 @@ import { hasClaude, hasOpenAI, hasAnyAI } from "../../config.js";
 import { renderChart } from "../../charts/renderer.js";
 import type { CouncilAnalysisResult, CouncilCritiqueResult, ModelVote } from "../../ai/types.js";
 import type { TechnicalSummary } from "../../analysis/types.js";
+import type { MarketOverview } from "../../data/types.js";
 
 /** A chat response — text content with an optional chart image. */
 export interface ChatResponse {
@@ -147,21 +148,27 @@ function isTradeProposal(text: string): boolean {
 // Compact market context for quick answers
 // ---------------------------------------------------------------------------
 
+/** Max output tokens for quick answers — short replies generate faster. */
+const QUICK_MAX_TOKENS = 350;
+
 /**
  * Build a concise market snapshot string that gives the AI enough context
  * to answer a quick question without running the full council.
  */
 function buildQuickContext(
   symbol: string,
-  price: number | null,
-  change24h: number | null,
+  marketData: MarketOverview | null,
   technicals: TechnicalSummary | null
 ): string {
   const parts: string[] = [];
 
-  if (price != null && change24h != null) {
+  if (marketData) {
+    const change24h = marketData.changePercent24h;
     const dir = change24h >= 0 ? "up" : "down";
-    parts.push(`${symbol} is at $${price.toLocaleString()} (${dir} ${Math.abs(change24h).toFixed(2)}% in 24h).`);
+    parts.push(
+      `${symbol} is at $${marketData.price.toLocaleString()} (${dir} ${Math.abs(change24h).toFixed(2)}% in 24h, ` +
+      `24h range $${marketData.low24h.toLocaleString()}–$${marketData.high24h.toLocaleString()}).`
+    );
   } else {
     parts.push(`${symbol} — price data unavailable.`);
   }
@@ -366,9 +373,10 @@ async function handleSymbolQuestion(
 ): Promise<ChatResponse> {
   const depth = detectQuestionDepth(question);
 
+  // 250 candles so SMA(200) actually computes; charts use the last 100.
   const [marketData, candles] = await Promise.all([
     fetch24hrCached(symbol),
-    fetchCandlesCached(symbol, "1h", 100),
+    fetchCandlesCached(symbol, "1h", 250),
   ]);
 
   let technicals: TechnicalSummary | null = null;
@@ -382,42 +390,40 @@ async function handleSymbolQuestion(
 
   // ── Quick path: short AI answer with market context, no council ──
   if (depth === "quick") {
-    const context = buildQuickContext(
-      symbol,
-      marketData?.price ?? null,
-      marketData?.changePercent24h ?? null,
-      technicals,
-    );
+    const context = buildQuickContext(symbol, marketData, technicals);
     const prompt = `${context}\n\nUser question: ${question}`;
-    const text = await singleAIChat(QUICK_SYSTEM_PROMPT, prompt);
+    // Cap output tokens — quick answers should be short AND fast to generate.
+    const text = await singleAIChat(QUICK_SYSTEM_PROMPT, prompt, QUICK_MAX_TOKENS);
     // No chart for quick questions — keep it snappy
     return { content: `**${priceInfo}**\n${text}`, symbol };
   }
 
   // ── Deep path: full council analysis with chart ──
 
-  // Generate chart image if we have enough candles
-  let chart: Buffer | undefined;
-  if (candles.length >= 10) {
-    try {
-      chart = await renderChart(
-        candles,
-        symbol,
-        marketData?.price,
-        marketData?.changePercent24h,
-      );
-    } catch (err) {
-      console.error(`[Chat] Chart render failed for ${symbol}:`, err);
-    }
-  }
+  // Kick off the chart render concurrently with the council call — the chart
+  // takes ~0.5–2s and the council 5–15s, so rendering in parallel is free.
+  const chartPromise: Promise<Buffer | undefined> =
+    candles.length >= 10
+      ? renderChart(
+          candles.slice(-100), // last 100 candles keeps the chart readable
+          symbol,
+          marketData?.price,
+          marketData?.changePercent24h,
+        ).catch((err) => {
+          console.error(`[Chat] Chart render failed for ${symbol}:`, err);
+          return undefined;
+        })
+      : Promise.resolve(undefined);
 
   if (isTradeProposal(question) && technicals) {
     const critique = await councilCritique(question, technicals);
+    const chart = await chartPromise;
     return { content: `**${priceInfo}**\n\n${formatCouncilCritique(critique)}`, chart, symbol };
   }
 
   if (technicals) {
     const analysis = await councilAnalyze(symbol, technicals);
+    const chart = await chartPromise;
     return { content: `**${priceInfo}**\n\n${formatCouncilAnalysis(analysis)}`, chart, symbol };
   }
 
@@ -428,6 +434,7 @@ async function handleSymbolQuestion(
 
   const prompt = `${context}\n\nUser question: ${question}`;
   const text = await singleAIChat(SYSTEM_PROMPT, prompt);
+  const chart = await chartPromise;
   return { content: text, chart, symbol };
 }
 
@@ -437,13 +444,14 @@ async function handleSymbolQuestion(
 
 async function singleAIChat(
   systemPrompt: string,
-  userMessage: string
+  userMessage: string,
+  maxTokens?: number
 ): Promise<string> {
   if (hasClaude()) {
-    return chatWithClaude(systemPrompt, userMessage);
+    return chatWithClaude(systemPrompt, userMessage, maxTokens);
   }
   if (hasOpenAI()) {
-    return chatWithOpenAI(systemPrompt, userMessage);
+    return chatWithOpenAI(systemPrompt, userMessage, maxTokens);
   }
   return "No AI models are configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.";
 }

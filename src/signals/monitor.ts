@@ -12,13 +12,13 @@
  * - A per-symbol in-flight guard prevents overlapping evaluations.
  * - Pushes are gated by hasSignalChanged (call change or >0.15 conviction move).
  *
- * Crypto klines are pulled from Binance (the same source we stream from) to
- * avoid hammering CoinGecko's tight free-tier limit.
+ * Candles come from the unified provider router — Binance first (with
+ * .com→.us host failover), CoinGecko as last resort — so the monitor keeps
+ * working even when a data source is unreachable.
  */
 import type { DataManager } from "../data/manager.js";
 import type { Tick, Candle } from "../data/types.js";
-import { fetchBinanceKlines } from "../data/binance.js";
-import { cache } from "../data/cache.js";
+import { fetchCandlesCached } from "../data/providers.js";
 import { analyzeTechnicals } from "../analysis/signals.js";
 import { councilAnalyze } from "../ai/council.js";
 import { hasAnyAI } from "../config.js";
@@ -49,13 +49,12 @@ export function isCouncilFresh(at: number, now = Date.now()): boolean {
   return now - at < COUNCIL_TTL_MS;
 }
 
-/** Fetch 1h klines for a crypto symbol, using the shared candle cache. */
+/**
+ * Fetch 1h candles via the unified provider router (Binance with host
+ * failover, CoinGecko fallback, shared cache). 250 so SMA(200) computes.
+ */
 async function getHourlyCandles(symbol: string) {
-  const cached = cache.getCandles(symbol, "1h");
-  if (cached && cached.length > 0) return cached;
-  const fresh = await fetchBinanceKlines(symbol, "1h", 100);
-  if (fresh.length > 0) cache.setCandles(symbol, "1h", fresh);
-  return fresh;
+  return fetchCandlesCached(symbol, "1h", 250);
 }
 
 /**

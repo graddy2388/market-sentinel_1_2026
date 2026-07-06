@@ -63,7 +63,7 @@ export async function handleAnalyze(interaction: ChatInputCommandInteraction): P
   const symbol = parsed.data;
   await interaction.deferReply();
 
-  const candles = await fetchCandlesCached(symbol, "1h", 100);
+  const candles = await fetchCandlesCached(symbol, "1h", 250);
   if (candles.length < 14) {
     await interaction.editReply(
       `Not enough data for **${symbol}**. Got ${candles.length} candles, need at least 14.`

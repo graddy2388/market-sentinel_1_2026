@@ -153,6 +153,7 @@ function intervalToFinnhubResolution(interval: CandleInterval): string {
     case "1m": return "1";
     case "5m": return "5";
     case "15m": return "15";
+    case "30m": return "30";
     case "1h": return "60";
     case "4h": return "60"; // No 4h resolution — use 1h candles
     case "1d": return "D";
@@ -167,6 +168,7 @@ function getTimeRange(interval: CandleInterval, limit: number): { from: number; 
     "1m": 60,
     "5m": 300,
     "15m": 900,
+    "30m": 1800,
     "1h": 3600,
     "4h": 3600, // Using 1h resolution
     "1d": 86400,

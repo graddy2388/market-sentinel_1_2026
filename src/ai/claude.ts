@@ -49,12 +49,13 @@ export async function claudeCritique(prompt: string): Promise<CritiqueResponse> 
 
 export async function chatWithClaude(
   systemPrompt: string,
-  userMessage: string
+  userMessage: string,
+  maxTokens = 1000
 ): Promise<string> {
   const response = await getClient().messages.create(
     {
       model: "claude-sonnet-4-6",
-      max_tokens: 1000,
+      max_tokens: maxTokens,
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
     },

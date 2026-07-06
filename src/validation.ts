@@ -11,7 +11,7 @@ export const symbolSchema = z
   .regex(/^[A-Za-z]+$/, "Symbol must be letters only")
   .transform((s) => s.toUpperCase());
 
-export const intervalSchema = z.enum(["1m", "5m", "15m", "1h", "4h", "1d"]);
+export const intervalSchema = z.enum(["1m", "5m", "15m", "30m", "1h", "4h", "1d"]);
 
 /** Interval with default for MCP tools where it's optional. */
 export const intervalSchemaWithDefault = intervalSchema.default("1h");

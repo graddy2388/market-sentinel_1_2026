@@ -31,13 +31,14 @@ ${signalList || "No signals generated yet."}
 Respond with a JSON object containing:
 - "direction": "bullish" | "bearish" | "neutral"
 - "confidence": 0.0 to 1.0
-- "reasoning": A concise explanation of your analysis (2-3 sentences)
-- "risks": Array of key risk factors (strings)
+- "reasoning": 1-2 short sentences, max 250 characters
+- "risks": Array of key risk factors — at most 4, each under 80 characters
 - "keyLevels": { "support": number or null, "resistance": number or null }
 - "timeframe": Your recommended timeframe for this analysis (e.g., "short-term (1-3 days)")
-- "actionSuggestion": What you'd recommend (e.g., "Hold — wait for RSI to cool before entering")
+- "actionSuggestion": One sentence (e.g., "Hold — wait for RSI to cool before entering")
 
 Be direct and honest. Do not hedge excessively. If the data clearly points one direction, say so.
+Keep the entire response brief — no filler.
 Respond ONLY with the JSON object, no markdown formatting.`;
 }
 
@@ -77,9 +78,10 @@ Look for these common mistakes:
 Respond with a JSON object:
 - "overallAssessment": "good" | "risky" | "bad"
 - "score": 0-10 (10 = excellent trade, 0 = terrible)
-- "issues": Array of { "type": string, "severity": "low"|"medium"|"high"|"critical", "description": string }
+- "issues": Array of { "type": string, "severity": "low"|"medium"|"high"|"critical", "description": string } — at most 4 issues, each description under 100 characters
 - "recommendation": Your blunt, honest recommendation (1-2 sentences)
 
 If it's a bad trade, say so clearly. The user wants honesty, not encouragement.
+Keep the entire response brief — no filler.
 Respond ONLY with the JSON object, no markdown formatting.`;
 }

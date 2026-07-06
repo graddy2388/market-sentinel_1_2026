@@ -1,11 +1,14 @@
 import {
   fetchPrice as cgFetchPrice,
   fetch24hr as cgFetch24hr,
-  fetch24hrCached as cgFetch24hrCached,
   fetchCandles as cgFetchCandles,
-  fetchCandlesCached as cgFetchCandlesCached,
   getSupportedSymbols as cgGetSupportedSymbols,
 } from "./coingecko.js";
+import {
+  fetchBinance24hr,
+  fetchBinanceKlines,
+  fetchBinancePrice,
+} from "./binance.js";
 import {
   isFinnhubAvailable,
   getKnownStockSymbols,
@@ -14,6 +17,45 @@ import {
 } from "./finnhub.js";
 import { cache } from "./cache.js";
 import type { Tick, MarketOverview, Candle, CandleInterval, MarketType } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Crypto data sourcing — Binance first, CoinGecko fallback.
+//
+// Binance public REST is preferred because it is faster, keyless, generous on
+// rate limits, and — critically — serves EXACT candle intervals with real
+// volume. CoinGecko's /ohlc endpoint auto-picks granularity by day range
+// (e.g. days=7 returns 4-HOUR candles regardless of the requested interval),
+// which silently mislabels candles and breaks indicator math. CoinGecko
+// remains the fallback for symbols without a Binance USDT pair (e.g. LEO,
+// stablecoins).
+// ---------------------------------------------------------------------------
+
+async function cryptoFetch24hr(symbol: string): Promise<MarketOverview | null> {
+  const b = await fetchBinance24hr(symbol);
+  if (b) {
+    return {
+      symbol,
+      market: "crypto",
+      price: b.price,
+      change24h: b.change,
+      changePercent24h: b.changePercent,
+      volume24h: b.quoteVolume, // USD-denominated, matches CoinGecko semantics
+      high24h: b.high,
+      low24h: b.low,
+    };
+  }
+  return cgFetch24hr(symbol);
+}
+
+async function cryptoFetchCandles(
+  symbol: string,
+  interval: CandleInterval,
+  limit: number
+): Promise<Candle[]> {
+  const klines = await fetchBinanceKlines(symbol, interval, limit);
+  if (klines.length > 0) return klines;
+  return cgFetchCandles(symbol, interval, limit);
+}
 
 // ---------------------------------------------------------------------------
 // Symbol classification
@@ -61,14 +103,13 @@ export function getStockSymbols(): string[] {
 
 /**
  * Fetch 24h market overview for any supported symbol.
- * Crypto → CoinGecko, stocks/ETFs → Finnhub.
+ * Crypto → Binance (CoinGecko fallback), stocks/ETFs → Finnhub.
  */
 export async function fetch24hr(symbol: string): Promise<MarketOverview | null> {
   const upper = symbol.toUpperCase();
 
-  // Try crypto first (known symbols)
   if (cgGetSupportedSymbols().includes(upper)) {
-    return cgFetch24hr(upper);
+    return cryptoFetch24hr(upper);
   }
 
   // Try stock/ETF via Finnhub
@@ -80,31 +121,19 @@ export async function fetch24hr(symbol: string): Promise<MarketOverview | null> 
 }
 
 /**
- * Fetch 24h market data with caching.
- * Uses the shared PriceCache for both crypto and stock data.
+ * Fetch 24h market data with caching (TTL 15s via the shared PriceCache).
  */
 export async function fetch24hrCached(symbol: string): Promise<MarketOverview | null> {
   const upper = symbol.toUpperCase();
 
-  // Check cache first (works for all market types)
   const cached = cache.getPrice(upper);
   if (cached) return cached;
 
-  // Route to the right provider
-  if (cgGetSupportedSymbols().includes(upper)) {
-    return cgFetch24hrCached(upper);
+  const data = await fetch24hr(upper);
+  if (data) {
+    cache.setPrice(upper, data);
   }
-
-  // Stock/ETF path
-  if (isFinnhubAvailable()) {
-    const data = await fetchStockQuote(upper);
-    if (data) {
-      cache.setPrice(upper, data);
-    }
-    return data;
-  }
-
-  return null;
+  return data;
 }
 
 /**
@@ -118,7 +147,7 @@ export async function fetchCandles(
   const upper = symbol.toUpperCase();
 
   if (cgGetSupportedSymbols().includes(upper)) {
-    return cgFetchCandles(upper, interval, limit);
+    return cryptoFetchCandles(upper, interval, limit);
   }
 
   if (isFinnhubAvailable()) {
@@ -129,7 +158,9 @@ export async function fetchCandles(
 }
 
 /**
- * Fetch candles with caching.
+ * Fetch candles with caching (TTL 60s).
+ * Only serves from cache when the cached set can satisfy the requested limit;
+ * otherwise refetches (and falls back to the stale cache if the fetch fails).
  */
 export async function fetchCandlesCached(
   symbol: string,
@@ -138,25 +169,18 @@ export async function fetchCandlesCached(
 ): Promise<Candle[]> {
   const upper = symbol.toUpperCase();
 
-  // Check cache first
   const cached = cache.getCandles(upper, interval);
-  if (cached) return cached.slice(-limit);
-
-  // Route to the right provider
-  if (cgGetSupportedSymbols().includes(upper)) {
-    return cgFetchCandlesCached(upper, interval, limit);
+  if (cached && cached.length >= limit) {
+    return cached.slice(-limit);
   }
 
-  // Stock/ETF path
-  if (isFinnhubAvailable()) {
-    const data = await fetchStockCandles(upper, interval, limit);
-    if (data.length > 0) {
-      cache.setCandles(upper, interval, data);
-    }
+  const data = await fetchCandles(upper, interval, limit);
+  if (data.length > 0) {
+    cache.setCandles(upper, interval, data);
     return data;
   }
-
-  return [];
+  // Fetch failed — serve whatever the cache still holds rather than nothing.
+  return cached ? cached.slice(-limit) : [];
 }
 
 /**
@@ -166,6 +190,8 @@ export async function fetchPrice(symbol: string): Promise<Tick | null> {
   const upper = symbol.toUpperCase();
 
   if (cgGetSupportedSymbols().includes(upper)) {
+    const tick = await fetchBinancePrice(upper);
+    if (tick) return tick;
     return cgFetchPrice(upper);
   }
 

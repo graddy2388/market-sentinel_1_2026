@@ -62,7 +62,8 @@ async function gatherSymbolData(symbol: string): Promise<SymbolBriefing | null> 
   const overview = await fetch24hrCached(symbol);
   if (!overview) return null;
 
-  const candles = await fetchCandlesCached(symbol, "1h", 100);
+  // 250 candles for indicator accuracy (SMA200); chart shows the last 100.
+  const candles = await fetchCandlesCached(symbol, "1h", 250);
   let technicals: TechnicalSummary | null = null;
   if (candles.length >= 14) {
     technicals = analyzeTechnicals(symbol, candles);
@@ -71,7 +72,7 @@ async function gatherSymbolData(symbol: string): Promise<SymbolBriefing | null> 
   let chart: Buffer | null = null;
   if (candles.length >= 10) {
     try {
-      chart = await renderChart(candles, symbol, overview.price, overview.changePercent24h);
+      chart = await renderChart(candles.slice(-100), symbol, overview.price, overview.changePercent24h);
     } catch {
       // Chart render failed — not critical
     }

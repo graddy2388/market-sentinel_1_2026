@@ -47,7 +47,8 @@ export async function openaiCritique(prompt: string): Promise<CritiqueResponse> 
 
 export async function chatWithOpenAI(
   systemPrompt: string,
-  userMessage: string
+  userMessage: string,
+  maxTokens = 1000
 ): Promise<string> {
   const response = await getClient().chat.completions.create(
     {
@@ -57,7 +58,7 @@ export async function chatWithOpenAI(
         { role: "user", content: userMessage },
       ],
       temperature: 0.3,
-      max_tokens: 1000,
+      max_tokens: maxTokens,
     },
     { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
   );

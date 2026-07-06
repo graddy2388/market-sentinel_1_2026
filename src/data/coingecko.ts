@@ -75,6 +75,7 @@ function getCoingeckoId(symbol: string): string | null {
 async function cgFetch(path: string): Promise<unknown> {
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) {
     throw new Error(`CoinGecko API error: ${res.status} ${res.statusText}`);
@@ -137,10 +138,35 @@ const INTERVAL_TO_DAYS: Record<CandleInterval, number> = {
   "1m": 1,
   "5m": 1,
   "15m": 1,
+  "30m": 2,
   "1h": 7,
   "4h": 30,
   "1d": 90,
 };
+
+/**
+ * Snap a candle spacing (ms) to the nearest known interval label.
+ * CoinGecko's /ohlc endpoint IGNORES the requested interval and picks
+ * granularity by day range (1-2d → 30m, 3-30d → 4h, 31d+ → 4d), so candles
+ * must be labeled by what they actually are, not what was asked for —
+ * otherwise indicator math and chart headers silently lie.
+ */
+export function snapIntervalFromSpacing(spacingMs: number): CandleInterval {
+  const minutes = spacingMs / 60_000;
+  const options: Array<[CandleInterval, number]> = [
+    ["1m", 1], ["5m", 5], ["15m", 15], ["30m", 30], ["1h", 60], ["4h", 240], ["1d", 1440],
+  ];
+  let best: CandleInterval = "1h";
+  let bestDiff = Infinity;
+  for (const [label, mins] of options) {
+    const diff = Math.abs(Math.log(minutes / mins)); // ratio distance
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = label;
+    }
+  }
+  return best;
+}
 
 export async function fetchCandles(
   symbol: string,
@@ -156,6 +182,10 @@ export async function fetchCandles(
       `/coins/${id}/ohlc?vs_currency=usd&days=${days}`
     )) as number[][];
 
+    // Label candles by their ACTUAL granularity (see snapIntervalFromSpacing).
+    const actualInterval =
+      data.length >= 2 ? snapIntervalFromSpacing(data[1][0] - data[0][0]) : interval;
+
     return data.slice(-limit).map((k) => ({
       symbol: symbol.toUpperCase(),
       market: "crypto" as const,
@@ -165,7 +195,7 @@ export async function fetchCandles(
       low: k[3],
       close: k[4],
       volume: 0,
-      interval,
+      interval: actualInterval,
     }));
   } catch {
     return [];
