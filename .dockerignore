@@ -11,7 +11,10 @@ secrets.env.tpl
 .dockerignore
 *.md
 tests
-scripts
+# Exclude host-side tooling but keep build-time scripts in the context.
+# (A bare "scripts" dir rule would prune the tree and make the negation useless.)
+scripts/*
+!scripts/copy-static.mjs
 docker-compose.yml
 drizzle.config.ts
 vitest.config.*
