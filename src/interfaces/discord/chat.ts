@@ -156,6 +156,38 @@ function isTradeProposal(text: string): boolean {
 const QUICK_MAX_TOKENS = 350;
 
 /**
+ * Max symbols analyzed from a single message. Each one runs a full council
+ * (one call per configured model) plus a chart render and its own reply, so
+ * without a cap a message listing many tickers fans out into hundreds of LLM
+ * calls. Extras are named back to the user instead of silently dropped.
+ */
+const MAX_SYMBOLS_PER_MESSAGE = 3;
+
+/**
+ * Max unknown tickers probed against Finnhub per message. The ticker regex
+ * matches any 2-6 char uppercase run, so ordinary prose ("DCA", "ATH", "USD")
+ * can produce many candidates; probing all of them concurrently would exhaust
+ * Finnhub's 60 req/min free tier.
+ */
+const MAX_TICKER_PROBES = 5;
+
+/**
+ * Build the assistant turn stored in memory for a multi-symbol reply.
+ *
+ * Stored turns are clamped to MAX_TURN_CHARS, so naively joining several full
+ * council write-ups lets the first symbol consume the entire budget and the
+ * rest fall off — the model would then have no memory of symbols it just
+ * discussed. Keeping the opening lines of each response keeps every symbol
+ * represented within the same budget.
+ */
+function condenseForMemory(responses: ChatResponse[]): string {
+  if (responses.length <= 1) return responses[0]?.content ?? "";
+  return responses
+    .map((r) => r.content.split("\n").slice(0, 3).join("\n"))
+    .join("\n\n");
+}
+
+/**
  * Build a concise market snapshot string that gives the AI enough context
  * to answer a quick question without running the full council.
  */
@@ -553,15 +585,19 @@ export async function handleChatMessage(
   try {
     const symbols = findAllSymbols(trimmed);
 
-    // Also pick up unknown tickers and try them as stock symbols (if Finnhub is up)
-    const unknowns = findUnknownTickers(trimmed, symbols);
+    // Also pick up unknown tickers and try them as stock symbols (if Finnhub is
+    // up). Probing is capped: findUnknownTickers matches any 2-6 char uppercase
+    // run, so a message full of acronyms would otherwise fire one concurrent
+    // HTTP request per token and blow Finnhub's 60/min free-tier limit.
+    const allUnknowns = findUnknownTickers(trimmed, symbols);
+    const toProbe = allUnknowns.slice(0, MAX_TICKER_PROBES);
     const resolvedStocks: string[] = [];
-    const trueUnknowns: string[] = [];
+    const trueUnknowns: string[] = allUnknowns.slice(MAX_TICKER_PROBES);
 
-    if (unknowns.length > 0 && isFinnhubAvailable()) {
+    if (toProbe.length > 0 && isFinnhubAvailable()) {
       // Check unknown tickers against Finnhub in parallel
       const checks = await Promise.allSettled(
-        unknowns.map(async (ticker) => {
+        toProbe.map(async (ticker) => {
           const available = await isSymbolAvailable(ticker);
           return { ticker, available };
         })
@@ -574,10 +610,15 @@ export async function handleChatMessage(
         }
       }
     } else {
-      trueUnknowns.push(...unknowns);
+      trueUnknowns.push(...toProbe);
     }
 
-    const allSymbols = [...symbols, ...resolvedStocks];
+    // Cap the symbol fan-out. Each symbol runs a full council (one call per
+    // configured model) plus a chart render and its own Discord reply, so an
+    // uncapped list multiplies into hundreds of LLM calls from a single message.
+    const requestedSymbols = [...symbols, ...resolvedStocks];
+    const allSymbols = requestedSymbols.slice(0, MAX_SYMBOLS_PER_MESSAGE);
+    const skippedSymbols = requestedSymbols.slice(MAX_SYMBOLS_PER_MESSAGE);
 
     if (allSymbols.length > 0) {
       // Process all symbols in parallel
@@ -596,6 +637,12 @@ export async function handleChatMessage(
         }
       }
 
+      if (skippedSymbols.length > 0) {
+        responses.push({
+          content: `Only analyzed the first ${MAX_SYMBOLS_PER_MESSAGE} symbols. Ask me about these separately: ${skippedSymbols.join(", ")}`,
+        });
+      }
+
       if (trueUnknowns.length > 0) {
         responses.push({ content: `Couldn't find data for: ${trueUnknowns.join(", ")}` });
       }
@@ -604,7 +651,7 @@ export async function handleChatMessage(
       // recorded too — it's what the user is usually asking about next.
       if (sessionId) {
         recordTurn(sessionId, "user", trimmed);
-        recordTurn(sessionId, "assistant", responses.map((r) => r.content).join("\n\n"));
+        recordTurn(sessionId, "assistant", condenseForMemory(responses));
       }
 
       return responses;
