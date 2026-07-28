@@ -138,11 +138,14 @@ export async function startDiscordBot(): Promise<Client> {
         a.contentType?.startsWith("image/")
       );
 
+      // Conversation memory is keyed per channel/DM so follow-ups keep context.
+      const sessionId = message.channelId;
+
       if (imageAttachment) {
-        const response = await handleImageMessage(question, imageAttachment.url);
+        const response = await handleImageMessage(question, imageAttachment.url, sessionId);
         await message.reply(response);
       } else {
-        const responses = await handleChatMessage(question);
+        const responses = await handleChatMessage(question, sessionId);
         for (const response of responses) {
           const opts: { content: string; files?: { attachment: Buffer; name: string }[] } = {
             content: response.content,

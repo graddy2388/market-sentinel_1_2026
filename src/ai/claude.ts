@@ -50,14 +50,15 @@ export async function claudeCritique(prompt: string): Promise<CritiqueResponse> 
 export async function chatWithClaude(
   systemPrompt: string,
   userMessage: string,
-  maxTokens = 1000
+  maxTokens = 1000,
+  history: Array<{ role: "user" | "assistant"; content: string }> = []
 ): Promise<string> {
   const response = await getClient().messages.create(
     {
       model: "claude-sonnet-4-6",
       max_tokens: maxTokens,
       system: systemPrompt,
-      messages: [{ role: "user", content: userMessage }],
+      messages: [...history, { role: "user" as const, content: userMessage }],
     },
     { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
   );

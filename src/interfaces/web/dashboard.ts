@@ -189,7 +189,8 @@ async function serveChat(req: IncomingMessage, res: ServerResponse): Promise<voi
     return;
   }
 
-  const responses = await handleChatMessage(message);
+  // Single shared session for the dashboard's chat panel.
+  const responses = await handleChatMessage(message, "dashboard");
   // Convert chart Buffers to data URLs the browser can render directly.
   const out = responses.map((r) => ({
     content: r.content,

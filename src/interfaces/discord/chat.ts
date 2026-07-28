@@ -5,6 +5,7 @@ import { councilAnalyze, councilCritique } from "../../ai/council.js";
 import { chatWithClaude, chatWithClaudeVision } from "../../ai/claude.js";
 import { chatWithOpenAI, chatWithOpenAIVision } from "../../ai/openai.js";
 import { hasClaude, hasOpenAI, hasAnyAI } from "../../config.js";
+import { getHistory, recordTurn, clearSession } from "../../ai/memory.js";
 import { renderChart } from "../../charts/renderer.js";
 import type { CouncilAnalysisResult, CouncilCritiqueResult, ModelVote } from "../../ai/types.js";
 import type { TechnicalSummary } from "../../analysis/types.js";
@@ -34,7 +35,9 @@ const SYSTEM_PROMPT =
   "Think of yourself as a mentor who's seen a lot of cycles. " +
   "You have access to real-time crypto market data. " +
   "Be concise — this is Discord, not an essay. " +
-  "If the user asks about a specific asset without naming it, ask them to specify.";
+  "You can see recent messages in this conversation — use them to resolve follow-up " +
+  "questions and pronouns (\"it\", \"that one\") instead of asking the user to repeat themselves. " +
+  "If an asset is genuinely ambiguous and not in the recent context, ask which one they mean.";
 
 /**
  * System prompt for quick questions (buy/sell, bull/bear, one-word, etc.).
@@ -47,7 +50,8 @@ const QUICK_SYSTEM_PROMPT =
   "If they ask buy or sell, just tell them and briefly say why. " +
   "Don't dump data they didn't ask for. Be direct but not robotic — " +
   "you're a mentor who respects people's time. " +
-  "Use the market data provided to inform your answer but don't list every indicator.";
+  "Use the market data provided to inform your answer but don't list every indicator. " +
+  "Recent conversation messages are available — use them for follow-up context.";
 
 // ---------------------------------------------------------------------------
 // Question depth detection
@@ -369,7 +373,8 @@ function truncate(text: string): string {
 
 async function handleSymbolQuestion(
   symbol: string,
-  question: string
+  question: string,
+  sessionId?: string
 ): Promise<ChatResponse> {
   const depth = detectQuestionDepth(question);
 
@@ -393,7 +398,7 @@ async function handleSymbolQuestion(
     const context = buildQuickContext(symbol, marketData, technicals);
     const prompt = `${context}\n\nUser question: ${question}`;
     // Cap output tokens — quick answers should be short AND fast to generate.
-    const text = await singleAIChat(QUICK_SYSTEM_PROMPT, prompt, QUICK_MAX_TOKENS);
+    const text = await singleAIChat(QUICK_SYSTEM_PROMPT, prompt, QUICK_MAX_TOKENS, sessionId);
     // No chart for quick questions — keep it snappy
     return { content: `**${priceInfo}**\n${text}`, symbol };
   }
@@ -433,7 +438,7 @@ async function handleSymbolQuestion(
     : `No market data available for ${symbol}.`;
 
   const prompt = `${context}\n\nUser question: ${question}`;
-  const text = await singleAIChat(SYSTEM_PROMPT, prompt);
+  const text = await singleAIChat(SYSTEM_PROMPT, prompt, undefined, sessionId);
   const chart = await chartPromise;
   return { content: text, chart, symbol };
 }
@@ -445,20 +450,26 @@ async function handleSymbolQuestion(
 async function singleAIChat(
   systemPrompt: string,
   userMessage: string,
-  maxTokens?: number
+  maxTokens?: number,
+  sessionId?: string
 ): Promise<string> {
+  // Prior turns for this channel/DM so follow-up questions have context.
+  const history = sessionId
+    ? getHistory(sessionId).map((t) => ({ role: t.role, content: t.content }))
+    : [];
+
   // Prefer Claude, but fall back to OpenAI if the call fails (invalid key,
   // outage, rate limit) — one dead provider must not mute the whole bot.
   if (hasClaude()) {
     try {
-      return await chatWithClaude(systemPrompt, userMessage, maxTokens);
+      return await chatWithClaude(systemPrompt, userMessage, maxTokens, history);
     } catch (err) {
       console.error("[Chat] Claude failed, falling back to OpenAI:", err instanceof Error ? err.message : err);
       if (!hasOpenAI()) throw err;
     }
   }
   if (hasOpenAI()) {
-    return chatWithOpenAI(systemPrompt, userMessage, maxTokens);
+    return chatWithOpenAI(systemPrompt, userMessage, maxTokens, history);
   }
   return "No AI models are configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.";
 }
@@ -475,7 +486,8 @@ const VISION_PROMPT =
 
 export async function handleImageMessage(
   question: string,
-  imageUrl: string
+  imageUrl: string,
+  sessionId?: string
 ): Promise<string> {
   if (!hasAnyAI()) {
     return "No AI models are configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable image analysis.";
@@ -497,7 +509,13 @@ export async function handleImageMessage(
     } else {
       response = await chatWithOpenAIVision(VISION_PROMPT, prompt, imageUrl);
     }
-    return truncate(response);
+    const answer = truncate(response);
+    // Record so follow-ups about the screenshot ("what's the risk there?") work.
+    if (sessionId) {
+      recordTurn(sessionId, "user", `[shared a screenshot] ${prompt}`);
+      recordTurn(sessionId, "assistant", answer);
+    }
+    return answer;
   } catch (err) {
     console.error("[Chat] Vision error:", err);
     return "Failed to analyze the image. Make sure it's a valid image format (PNG, JPG, GIF, WebP).";
@@ -508,8 +526,15 @@ export async function handleImageMessage(
  * Handle a chat message. Returns an array of ChatResponse objects —
  * one per symbol when multiple are mentioned, plus any notes.
  * Each response includes text content and an optional chart image buffer.
+ *
+ * @param sessionId Conversation key (Discord channel/DM id, or "dashboard").
+ *                  When provided, recent turns are fed back to the model so
+ *                  follow-up questions resolve against earlier context.
  */
-export async function handleChatMessage(question: string): Promise<ChatResponse[]> {
+export async function handleChatMessage(
+  question: string,
+  sessionId?: string
+): Promise<ChatResponse[]> {
   if (!hasAnyAI()) {
     return [{ content: "No AI models are configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable chat." }];
   }
@@ -517,6 +542,12 @@ export async function handleChatMessage(question: string): Promise<ChatResponse[
   const trimmed = question.trim();
   if (!trimmed) {
     return [{ content: "You mentioned me but didn't ask anything. What do you want to know?" }];
+  }
+
+  // Let users explicitly wipe context.
+  if (sessionId && /^(reset|forget|clear|new chat|start over)$/i.test(trimmed)) {
+    clearSession(sessionId);
+    return [{ content: "Cleared our conversation history. Starting fresh — what's on your mind?" }];
   }
 
   try {
@@ -551,7 +582,7 @@ export async function handleChatMessage(question: string): Promise<ChatResponse[
     if (allSymbols.length > 0) {
       // Process all symbols in parallel
       const results = await Promise.allSettled(
-        allSymbols.map((sym) => handleSymbolQuestion(sym, trimmed))
+        allSymbols.map((sym) => handleSymbolQuestion(sym, trimmed, sessionId))
       );
 
       const responses: ChatResponse[] = [];
@@ -569,11 +600,23 @@ export async function handleChatMessage(question: string): Promise<ChatResponse[
         responses.push({ content: `Couldn't find data for: ${trueUnknowns.join(", ")}` });
       }
 
+      // Remember this exchange so follow-ups have context. Council output is
+      // recorded too — it's what the user is usually asking about next.
+      if (sessionId) {
+        recordTurn(sessionId, "user", trimmed);
+        recordTurn(sessionId, "assistant", responses.map((r) => r.content).join("\n\n"));
+      }
+
       return responses;
     }
 
     // General trading question — single AI call
-    return [{ content: truncate(await singleAIChat(SYSTEM_PROMPT, trimmed)) }];
+    const answer = truncate(await singleAIChat(SYSTEM_PROMPT, trimmed, undefined, sessionId));
+    if (sessionId) {
+      recordTurn(sessionId, "user", trimmed);
+      recordTurn(sessionId, "assistant", answer);
+    }
+    return [{ content: answer }];
   } catch (err) {
     console.error("[Chat] Error handling message:", err);
     return [{ content: "Something went wrong while processing your question. Try again in a moment." }];

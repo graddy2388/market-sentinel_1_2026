@@ -188,6 +188,8 @@ export function helpEmbed(): EmbedBuilder {
           '• Quick questions → short answer ("buy or sell BTC?")',
           '• Deep questions → full council analysis ("analyze ETH technicals")',
           "• Send a screenshot → I'll analyze charts, positions, or P&L",
+          '• I remember recent messages per channel, so follow-ups work ("why?")',
+          '• Say "reset" to clear our conversation history',
         ].join("\n"),
         inline: false,
       },

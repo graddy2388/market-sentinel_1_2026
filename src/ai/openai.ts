@@ -48,14 +48,16 @@ export async function openaiCritique(prompt: string): Promise<CritiqueResponse> 
 export async function chatWithOpenAI(
   systemPrompt: string,
   userMessage: string,
-  maxTokens = 1000
+  maxTokens = 1000,
+  history: Array<{ role: "user" | "assistant"; content: string }> = []
 ): Promise<string> {
   const response = await getClient().chat.completions.create(
     {
       model: "gpt-4o",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
+        ...history,
+        { role: "user" as const, content: userMessage },
       ],
       temperature: 0.3,
       max_tokens: maxTokens,
