@@ -17,11 +17,15 @@ vi.mock("../src/data/binance.js", () => ({
 const cg24hrMock = vi.fn();
 const cgCandlesMock = vi.fn();
 const cgPriceMock = vi.fn();
+const resolveCoinIdMock = vi.fn();
 vi.mock("../src/data/coingecko.js", () => ({
   fetch24hr: (...a: unknown[]) => cg24hrMock(...a),
   fetchCandles: (...a: unknown[]) => cgCandlesMock(...a),
   fetchPrice: (...a: unknown[]) => cgPriceMock(...a),
   getSupportedSymbols: () => ["BTC", "LEO"],
+  // Dynamic resolution for symbols outside the curated map.
+  resolveCoinId: (...a: unknown[]) => resolveCoinIdMock(...a),
+  getDiscoveredSymbols: () => [],
 }));
 
 vi.mock("../src/data/finnhub.js", () => ({
@@ -55,6 +59,9 @@ beforeEach(() => {
   cg24hrMock.mockReset();
   cgCandlesMock.mockReset();
   cgPriceMock.mockReset();
+  resolveCoinIdMock.mockReset();
+  // Default: unknown symbols are not crypto (each test opts in as needed).
+  resolveCoinIdMock.mockResolvedValue(null);
 });
 
 describe("fetch24hr routing", () => {
@@ -90,6 +97,22 @@ describe("fetch24hr routing", () => {
   it("returns null for unknown symbols with no stock provider", async () => {
     expect(await fetch24hr("NOTREAL")).toBeNull();
     expect(binance24hrMock).not.toHaveBeenCalled();
+  });
+
+  it("routes an uncurated but real coin through the crypto path (the VVV case)", async () => {
+    // Not in the curated map, but CoinGecko knows it.
+    resolveCoinIdMock.mockResolvedValue("venice-token");
+    binance24hrMock.mockResolvedValue(null); // no Binance pair for this coin
+    cg24hrMock.mockResolvedValue({
+      symbol: "VVV", market: "crypto", price: 13.26, change24h: 0.2,
+      changePercent24h: 1.75, volume24h: 5_000_000, high24h: 13.5, low24h: 12.9,
+    });
+
+    const data = await fetch24hr("VVV");
+
+    expect(data).not.toBeNull();
+    expect(data!.price).toBe(13.26);
+    expect(data!.market).toBe("crypto");
   });
 });
 

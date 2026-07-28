@@ -3,6 +3,8 @@ import {
   fetch24hr as cgFetch24hr,
   fetchCandles as cgFetchCandles,
   getSupportedSymbols as cgGetSupportedSymbols,
+  resolveCoinId,
+  getDiscoveredSymbols,
 } from "./coingecko.js";
 import {
   fetchBinance24hr,
@@ -61,15 +63,44 @@ async function cryptoFetchCandles(
 // Symbol classification
 // ---------------------------------------------------------------------------
 
+/** True when a symbol is in the curated crypto map (no network call). */
+function isCuratedCrypto(symbol: string): boolean {
+  return cgGetSupportedSymbols().includes(symbol.toUpperCase());
+}
+
 /**
- * Determine which market a symbol belongs to.
- * - Known CoinGecko symbols → "crypto"
- * - Everything else when Finnhub is available → "stock" (includes commodity ETFs)
- * - If nothing matches → null
+ * Resolve a symbol to a market, consulting the network for unknowns.
+ *
+ * Order matters: curated crypto → known stock → dynamic crypto lookup →
+ * Finnhub live lookup. The dynamic crypto step is what lets coins outside the
+ * curated map (e.g. VVV) work at all; without it they fell through to a stock
+ * probe that could never match and were reported as "no data".
+ */
+export async function resolveMarket(symbol: string): Promise<MarketType | null> {
+  const upper = symbol.toUpperCase();
+
+  if (isCuratedCrypto(upper)) return "crypto";
+  if (getKnownStockSymbols().includes(upper)) return "stock";
+
+  // Unknown ticker — try crypto first (CoinGecko covers ~18k coins).
+  if (await resolveCoinId(upper)) return "crypto";
+
+  if (isFinnhubAvailable()) {
+    const quote = await fetchStockQuote(upper);
+    if (quote) return "stock";
+  }
+
+  return null;
+}
+
+/**
+ * Synchronous best-effort classification (no network).
+ * Prefer resolveMarket() when a lookup is acceptable.
  */
 export function classifySymbol(symbol: string): MarketType | null {
   const upper = symbol.toUpperCase();
-  if (cgGetSupportedSymbols().includes(upper)) return "crypto";
+  if (isCuratedCrypto(upper)) return "crypto";
+  if (getDiscoveredSymbols().includes(upper)) return "crypto";
   if (isFinnhubAvailable()) return "stock";
   return null;
 }
@@ -108,11 +139,21 @@ export function getStockSymbols(): string[] {
 export async function fetch24hr(symbol: string): Promise<MarketOverview | null> {
   const upper = symbol.toUpperCase();
 
-  if (cgGetSupportedSymbols().includes(upper)) {
+  if (isCuratedCrypto(upper)) {
     return cryptoFetch24hr(upper);
   }
 
-  // Try stock/ETF via Finnhub
+  // Known stock/ETF → Finnhub.
+  if (getKnownStockSymbols().includes(upper)) {
+    return fetchStockQuote(upper);
+  }
+
+  // Unknown ticker: try crypto (covers the ~18k coins outside the curated map)
+  // before falling back to a stock lookup.
+  if (await resolveCoinId(upper)) {
+    return cryptoFetch24hr(upper);
+  }
+
   if (isFinnhubAvailable()) {
     return fetchStockQuote(upper);
   }
@@ -146,7 +187,15 @@ export async function fetchCandles(
 ): Promise<Candle[]> {
   const upper = symbol.toUpperCase();
 
-  if (cgGetSupportedSymbols().includes(upper)) {
+  if (isCuratedCrypto(upper)) {
+    return cryptoFetchCandles(upper, interval, limit);
+  }
+
+  if (getKnownStockSymbols().includes(upper)) {
+    return fetchStockCandles(upper, interval, limit);
+  }
+
+  if (await resolveCoinId(upper)) {
     return cryptoFetchCandles(upper, interval, limit);
   }
 
@@ -189,14 +238,16 @@ export async function fetchCandlesCached(
 export async function fetchPrice(symbol: string): Promise<Tick | null> {
   const upper = symbol.toUpperCase();
 
-  if (cgGetSupportedSymbols().includes(upper)) {
+  const market = await resolveMarket(upper);
+
+  if (market === "crypto") {
     const tick = await fetchBinancePrice(upper);
     if (tick) return tick;
     return cgFetchPrice(upper);
   }
 
   // For stocks, derive a Tick from the quote
-  if (isFinnhubAvailable()) {
+  if (market === "stock") {
     const quote = await fetchStockQuote(upper);
     if (!quote) return null;
     return {
@@ -213,18 +264,8 @@ export async function fetchPrice(symbol: string): Promise<Tick | null> {
 
 /**
  * Check if a symbol can be resolved to any data source.
- * For unknown tickers, tries Finnhub if available.
+ * Tries crypto (curated + CoinGecko's full catalog) before stocks.
  */
 export async function isSymbolAvailable(symbol: string): Promise<boolean> {
-  const upper = symbol.toUpperCase();
-  if (cgGetSupportedSymbols().includes(upper)) return true;
-  if (getKnownStockSymbols().includes(upper)) return true;
-
-  // Unknown ticker — try a live lookup via Finnhub
-  if (isFinnhubAvailable()) {
-    const quote = await fetchStockQuote(upper);
-    return quote !== null;
-  }
-
-  return false;
+  return (await resolveMarket(symbol)) !== null;
 }

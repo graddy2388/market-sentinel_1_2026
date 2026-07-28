@@ -68,8 +68,73 @@ const SYMBOL_TO_ID: Record<string, string> = {
   USDC: "usd-coin",
 };
 
-function getCoingeckoId(symbol: string): string | null {
-  return SYMBOL_TO_ID[symbol.toUpperCase()] ?? null;
+// ---------------------------------------------------------------------------
+// Dynamic symbol resolution
+//
+// The curated map above covers the majors, but CoinGecko lists ~18,000 coins.
+// Anything outside the map (e.g. VVV / Venice Token, mcap rank ~87) would
+// otherwise be unreachable. For unknown symbols we query CoinGecko's /search,
+// which returns candidates with a market_cap_rank.
+//
+// Ticker collisions are rampant — many unrelated tokens share a symbol — so we
+// only accept an EXACT symbol match that carries a market_cap_rank, and pick
+// the highest-ranked one. Requiring a rank filters out the long tail of
+// unranked copycat tokens that would otherwise hijack a well-known ticker.
+// ---------------------------------------------------------------------------
+
+/** Cached resolutions. `null` = confirmed not a coin (negative cache). */
+const dynamicIdCache = new Map<string, string | null>();
+
+/** Symbols resolved dynamically this process, for symbol-detection purposes. */
+const discoveredSymbols = new Set<string>();
+
+interface SearchCoin {
+  id: string;
+  symbol: string;
+  name: string;
+  market_cap_rank: number | null;
+}
+
+/**
+ * Resolve a ticker to a CoinGecko id: curated map first (no network call),
+ * then a ranked /search lookup. Results are cached, including misses.
+ */
+export async function resolveCoinId(symbol: string): Promise<string | null> {
+  const upper = symbol.toUpperCase();
+
+  const curated = SYMBOL_TO_ID[upper];
+  if (curated) return curated;
+
+  if (dynamicIdCache.has(upper)) return dynamicIdCache.get(upper)!;
+
+  try {
+    const data = (await cgFetch(`/search?query=${encodeURIComponent(upper)}`)) as {
+      coins?: SearchCoin[];
+    };
+    const ranked = (data.coins ?? [])
+      .filter((c) => c.symbol?.toUpperCase() === upper && c.market_cap_rank != null)
+      .sort((a, b) => (a.market_cap_rank ?? Infinity) - (b.market_cap_rank ?? Infinity));
+
+    const id = ranked[0]?.id ?? null;
+    dynamicIdCache.set(upper, id);
+    if (id) discoveredSymbols.add(upper);
+    return id;
+  } catch {
+    // Don't cache transient failures — a rate limit shouldn't permanently
+    // blacklist a real coin.
+    return null;
+  }
+}
+
+/** Symbols resolved dynamically so far (used to widen symbol detection). */
+export function getDiscoveredSymbols(): string[] {
+  return [...discoveredSymbols];
+}
+
+/** Test helper: clear dynamic resolution state. */
+export function _resetDynamicCache(): void {
+  dynamicIdCache.clear();
+  discoveredSymbols.clear();
 }
 
 async function cgFetch(path: string): Promise<unknown> {
@@ -84,7 +149,7 @@ async function cgFetch(path: string): Promise<unknown> {
 }
 
 export async function fetchPrice(symbol: string): Promise<Tick | null> {
-  const id = getCoingeckoId(symbol);
+  const id = await resolveCoinId(symbol);
   if (!id) return null;
   try {
     const data = (await cgFetch(
@@ -105,7 +170,7 @@ export async function fetchPrice(symbol: string): Promise<Tick | null> {
 }
 
 export async function fetch24hr(symbol: string): Promise<MarketOverview | null> {
-  const id = getCoingeckoId(symbol);
+  const id = await resolveCoinId(symbol);
   if (!id) return null;
   try {
     const data = (await cgFetch(`/coins/${id}?localization=false&tickers=false&community_data=false&developer_data=false`)) as {
@@ -134,14 +199,18 @@ export async function fetch24hr(symbol: string): Promise<MarketOverview | null> 
   }
 }
 
+// CoinGecko's /ohlc picks granularity from the day range: 1-2d → 30m,
+// 3-30d → 4h, 31d+ → 4d. Request the widest range that still yields the
+// granularity we want, so indicators have enough history — days=7 returned
+// only ~42 candles, too few for even SMA(50). days=30 yields ~180.
 const INTERVAL_TO_DAYS: Record<CandleInterval, number> = {
   "1m": 1,
   "5m": 1,
   "15m": 1,
   "30m": 2,
-  "1h": 7,
+  "1h": 30,
   "4h": 30,
-  "1d": 90,
+  "1d": 180,
 };
 
 /**
@@ -173,7 +242,7 @@ export async function fetchCandles(
   interval: CandleInterval = "1h",
   limit = 100
 ): Promise<Candle[]> {
-  const id = getCoingeckoId(symbol);
+  const id = await resolveCoinId(symbol);
   if (!id) return [];
 
   const days = INTERVAL_TO_DAYS[interval] ?? 2;

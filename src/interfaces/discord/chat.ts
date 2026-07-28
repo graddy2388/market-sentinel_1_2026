@@ -594,7 +594,10 @@ export async function handleChatMessage(
     const resolvedStocks: string[] = [];
     const trueUnknowns: string[] = allUnknowns.slice(MAX_TICKER_PROBES);
 
-    if (toProbe.length > 0 && isFinnhubAvailable()) {
+    // Probe regardless of Finnhub: isSymbolAvailable now also resolves crypto
+    // against CoinGecko's full catalog, which is how coins outside the curated
+    // map (e.g. VVV) get discovered.
+    if (toProbe.length > 0) {
       // Check unknown tickers against Finnhub in parallel
       const checks = await Promise.allSettled(
         toProbe.map(async (ticker) => {
