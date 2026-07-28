@@ -447,8 +447,15 @@ async function singleAIChat(
   userMessage: string,
   maxTokens?: number
 ): Promise<string> {
+  // Prefer Claude, but fall back to OpenAI if the call fails (invalid key,
+  // outage, rate limit) — one dead provider must not mute the whole bot.
   if (hasClaude()) {
-    return chatWithClaude(systemPrompt, userMessage, maxTokens);
+    try {
+      return await chatWithClaude(systemPrompt, userMessage, maxTokens);
+    } catch (err) {
+      console.error("[Chat] Claude failed, falling back to OpenAI:", err instanceof Error ? err.message : err);
+      if (!hasOpenAI()) throw err;
+    }
   }
   if (hasOpenAI()) {
     return chatWithOpenAI(systemPrompt, userMessage, maxTokens);
@@ -479,7 +486,14 @@ export async function handleImageMessage(
   try {
     let response: string;
     if (hasClaude()) {
-      response = await chatWithClaudeVision(VISION_PROMPT, prompt, imageUrl);
+      try {
+        response = await chatWithClaudeVision(VISION_PROMPT, prompt, imageUrl);
+      } catch (err) {
+        // Fall back to OpenAI vision if Claude fails (invalid key, outage).
+        if (!hasOpenAI()) throw err;
+        console.error("[Chat] Claude vision failed, falling back to OpenAI:", err instanceof Error ? err.message : err);
+        response = await chatWithOpenAIVision(VISION_PROMPT, prompt, imageUrl);
+      }
     } else {
       response = await chatWithOpenAIVision(VISION_PROMPT, prompt, imageUrl);
     }
