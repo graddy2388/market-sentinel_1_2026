@@ -93,7 +93,48 @@ export function recordTurn(
 }
 
 /**
- * Get the recent turns for a session, oldest first.
+ * Normalize a turn list into something the Messages API will accept.
+ *
+ * The Anthropic API requires strictly alternating user/assistant roles starting
+ * with 'user', and rejects anything else with a 400. History can violate that
+ * whenever an assistant turn goes unrecorded — e.g. a model returns empty
+ * content (OpenAI yields "" for a null completion) or a request fails between
+ * the user and assistant writes. Because history persists, a single violation
+ * would otherwise poison every later message in that session until the TTL
+ * expired.
+ *
+ * Rules:
+ * - Runs of same-role turns are merged into one (content joined), preserving
+ *   what was said without breaking alternation.
+ * - A leading assistant turn is dropped (nothing for it to reply to).
+ */
+export function normalizeHistory(turns: ConversationTurn[]): ConversationTurn[] {
+  const merged: ConversationTurn[] = [];
+
+  for (const turn of turns) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === turn.role) {
+      merged[merged.length - 1] = {
+        role: prev.role,
+        content: clampContent(`${prev.content}\n${turn.content}`),
+        timestamp: turn.timestamp,
+      };
+    } else {
+      merged.push({ ...turn });
+    }
+  }
+
+  // A conversation sent to the model must open with a user turn.
+  while (merged.length > 0 && merged[0].role === "assistant") {
+    merged.shift();
+  }
+
+  return merged;
+}
+
+/**
+ * Get the recent turns for a session, oldest first, normalized so the result is
+ * always safe to send to a chat completions API (see normalizeHistory).
  * Returns [] for unknown or expired sessions.
  */
 export function getHistory(sessionId: string): ConversationTurn[] {
@@ -104,7 +145,7 @@ export function getHistory(sessionId: string): ConversationTurn[] {
     sessions.delete(sessionId);
     return [];
   }
-  return session.turns.slice();
+  return normalizeHistory(session.turns);
 }
 
 /** Forget a single session (e.g. an explicit "reset" command). */

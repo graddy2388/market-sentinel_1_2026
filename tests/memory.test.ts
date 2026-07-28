@@ -52,18 +52,22 @@ describe("recordTurn / getHistory", () => {
   });
 
   it("trims turns beyond MAX_TURNS, keeping the most recent", () => {
-    for (let i = 0; i < MAX_TURNS + 5; i++) {
-      recordTurn("chan1", "user", `message ${i}`);
+    // Realistic usage: alternating user/assistant pairs.
+    const pairs = MAX_TURNS; // 2x MAX_TURNS messages total
+    for (let i = 0; i < pairs; i++) {
+      recordTurn("chan1", "user", `q${i}`);
+      recordTurn("chan1", "assistant", `a${i}`);
     }
     const history = getHistory("chan1");
     expect(history).toHaveLength(MAX_TURNS);
-    // Oldest retained should be message 5 (0-4 dropped)
-    expect(history[0].content).toBe("message 5");
-    expect(history[history.length - 1].content).toBe(`message ${MAX_TURNS + 4}`);
+    // The oldest retained turn is the user half of the 7th-from-last pair.
+    expect(history[0].role).toBe("user");
+    expect(history[0].content).toBe(`q${pairs - MAX_TURNS / 2}`);
+    expect(history[history.length - 1].content).toBe(`a${pairs - 1}`);
   });
 
   it("clamps very long turns", () => {
-    recordTurn("chan1", "assistant", "x".repeat(MAX_TURN_CHARS + 500));
+    recordTurn("chan1", "user", "x".repeat(MAX_TURN_CHARS + 500));
     const [turn] = getHistory("chan1");
     expect(turn.content.length).toBe(MAX_TURN_CHARS);
     expect(turn.content.endsWith("...")).toBe(true);
