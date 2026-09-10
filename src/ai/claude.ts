@@ -100,3 +100,25 @@ export async function chatWithClaudeVision(
   if (block.type !== "text") throw new Error("Unexpected response type");
   return block.text;
 }
+
+/**
+ * One turn of a tool-enabled conversation. Returns the raw message so the
+ * caller can inspect stop_reason and tool_use blocks and drive the loop.
+ */
+export async function claudeToolTurn(
+  system: string,
+  messages: Anthropic.MessageParam[],
+  tools: Anthropic.Tool[],
+  maxTokens = 1200
+): Promise<Anthropic.Message> {
+  return getClient().messages.create(
+    {
+      model: "claude-sonnet-4-6",
+      max_tokens: maxTokens,
+      system,
+      messages,
+      tools,
+    },
+    { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
+  );
+}

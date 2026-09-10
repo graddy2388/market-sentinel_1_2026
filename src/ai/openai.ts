@@ -104,3 +104,25 @@ export async function chatWithOpenAIVision(
   );
   return response.choices[0]?.message?.content ?? "";
 }
+
+/**
+ * One turn of a tool-enabled conversation. Returns the raw assistant message
+ * so the caller can inspect tool_calls and drive the loop.
+ */
+export async function openaiToolTurn(
+  messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  tools: OpenAI.Chat.ChatCompletionTool[],
+  maxTokens = 1200
+): Promise<OpenAI.Chat.ChatCompletionMessage> {
+  const response = await getClient().chat.completions.create(
+    {
+      model: "gpt-4o",
+      messages,
+      tools,
+      temperature: 0.3,
+      max_tokens: maxTokens,
+    },
+    { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
+  );
+  return response.choices[0].message;
+}

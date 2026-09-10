@@ -15,6 +15,7 @@ import {
   priceSchema,
   notesSchema,
 } from "../../validation.js";
+import { addToWatchlist, removeFromWatchlist } from "../../state/watchlist.js";
 import type { AnalysisResponse, CritiqueResponse } from "../../ai/types.js";
 
 function formatAnalysis(label: string, analysis: AnalysisResponse): string {
@@ -229,15 +230,12 @@ export function registerCommands(program: Command): void {
         return;
       }
 
-      const db = await getDb();
-      db.insert(watchlist)
-        .values({
-          symbol: symResult.data,
-          market: marketResult.data,
-        })
-        .run();
-      saveDb();
-      console.log(`  Added ${symResult.data} (${marketResult.data}) to watchlist.`);
+      const result = await addToWatchlist(symResult.data, marketResult.data);
+      console.log(
+        result.added
+          ? `  Added ${result.symbol} (${result.market}) to watchlist.`
+          : `  ${result.symbol} is already on the watchlist.`
+      );
     });
 
   program
@@ -249,12 +247,12 @@ export function registerCommands(program: Command): void {
         console.error(`Invalid symbol: ${symResult.error.issues[0].message}`);
         return;
       }
-      const db = await getDb();
-      db.delete(watchlist)
-        .where(eq(watchlist.symbol, symResult.data))
-        .run();
-      saveDb();
-      console.log(`  Removed ${symResult.data} from watchlist.`);
+      const removed = await removeFromWatchlist(symResult.data);
+      console.log(
+        removed
+          ? `  Removed ${symResult.data} from watchlist.`
+          : `  ${symResult.data} wasn't on the watchlist.`
+      );
     });
 
   program

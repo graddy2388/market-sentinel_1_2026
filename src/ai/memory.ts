@@ -34,6 +34,8 @@ export const MAX_SESSIONS = 500;
 interface Session {
   turns: ConversationTurn[];
   lastActivity: number;
+  /** Symbols most recently discussed, so follow-ups can resolve "it". */
+  activeSymbols: string[];
 }
 
 const sessions = new Map<string, Session>();
@@ -80,7 +82,7 @@ export function recordTurn(
 
   let session = sessions.get(sessionId);
   if (!session) {
-    session = { turns: [], lastActivity: now };
+    session = { turns: [], lastActivity: now, activeSymbols: [] };
     sessions.set(sessionId, session);
     evictLruIfNeeded();
   }
@@ -161,4 +163,41 @@ export function clearAllSessions(): void {
 /** Number of tracked sessions (diagnostics/tests). */
 export function sessionCount(): number {
   return sessions.size;
+}
+
+// ---------------------------------------------------------------------------
+// Active symbols
+//
+// Conversation memory carries the *words* of prior turns, but a follow-up like
+// "yes pull current" or "how's it looking?" names no ticker — so symbol
+// detection (which only scans the current message) found nothing and no market
+// data was fetched. Tracking the last-discussed symbols lets those follow-ups
+// resolve to a real asset. Stored on the session so they expire with its TTL.
+// ---------------------------------------------------------------------------
+
+/** Remember which symbols this conversation is currently about. */
+export function setActiveSymbols(sessionId: string, symbols: string[]): void {
+  if (!sessionId || symbols.length === 0) return;
+
+  const now = Date.now();
+  let session = sessions.get(sessionId);
+  if (!session) {
+    session = { turns: [], lastActivity: now, activeSymbols: [] };
+    sessions.set(sessionId, session);
+    evictLruIfNeeded();
+  }
+  session.activeSymbols = symbols.map((s) => s.toUpperCase());
+  session.lastActivity = now;
+}
+
+/** Symbols this conversation is currently about ([] when unknown/expired). */
+export function getActiveSymbols(sessionId: string): string[] {
+  if (!sessionId) return [];
+  const session = sessions.get(sessionId);
+  if (!session) return [];
+  if (Date.now() - session.lastActivity > SESSION_TTL_MS) {
+    sessions.delete(sessionId);
+    return [];
+  }
+  return session.activeSymbols.slice();
 }

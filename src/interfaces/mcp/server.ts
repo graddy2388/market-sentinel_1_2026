@@ -30,6 +30,7 @@ import {
   descriptionSchema,
   notesSchema,
 } from "../../validation.js";
+import { addToWatchlist, removeFromWatchlist } from "../../state/watchlist.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -184,14 +185,26 @@ function createMcpServer(): McpServer {
       }
 
       if (action === "add") {
-        db.insert(watchlist).values({ symbol: symbol.toUpperCase(), market }).run();
-        saveDb();
-        return { content: [{ type: "text" as const, text: `Added ${symbol.toUpperCase()} (${market}) to watchlist.` }] };
+        const result = await addToWatchlist(symbol, market);
+        return {
+          content: [{
+            type: "text" as const,
+            text: result.added
+              ? `Added ${result.symbol} (${result.market}) to watchlist.`
+              : `${result.symbol} is already on the watchlist.`,
+          }],
+        };
       }
 
-      db.delete(watchlist).where(eq(watchlist.symbol, symbol.toUpperCase())).run();
-      saveDb();
-      return { content: [{ type: "text" as const, text: `Removed ${symbol.toUpperCase()} from watchlist.` }] };
+      const removed = await removeFromWatchlist(symbol);
+      return {
+        content: [{
+          type: "text" as const,
+          text: removed
+            ? `Removed ${symbol.toUpperCase()} from watchlist.`
+            : `${symbol.toUpperCase()} was not on the watchlist.`,
+        }],
+      };
     }
   );
 
