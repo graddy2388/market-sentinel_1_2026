@@ -315,3 +315,92 @@ export async function fetchCandlesCached(
   }
   return data;
 }
+
+// ---------------------------------------------------------------------------
+// Crypto-native research context
+//
+// fetch24hr() deliberately suppresses community/developer data to keep the hot
+// path small. The Research Agent wants exactly that suppressed material —
+// supply structure, distance from all-time high, developer activity, and
+// category — which Finnhub does not cover for crypto at all.
+// ---------------------------------------------------------------------------
+
+export interface CoinContext {
+  symbol: string;
+  name: string;
+  marketCapRank: number | null;
+  marketCapUsd: number | null;
+  circulatingSupply: number | null;
+  totalSupply: number | null;
+  maxSupply: number | null;
+  athUsd: number | null;
+  percentFromAth: number | null;
+  atlUsd: number | null;
+  categories: string[];
+  description: string | null;
+  developer: { stars: number | null; forks: number | null; commits4Weeks: number | null } | null;
+  community: { twitterFollowers: number | null; redditSubscribers: number | null } | null;
+}
+
+export async function fetchCoinContext(symbol: string): Promise<CoinContext | null> {
+  const id = await resolveCoinId(symbol);
+  if (!id) return null;
+
+  try {
+    const data = (await cgFetch(
+      `/coins/${id}?localization=false&tickers=false&market_data=true` +
+        `&community_data=true&developer_data=true&sparkline=false`
+    )) as {
+      name?: string;
+      categories?: (string | null)[];
+      description?: { en?: string };
+      market_cap_rank?: number;
+      market_data?: {
+        market_cap?: { usd?: number };
+        circulating_supply?: number;
+        total_supply?: number;
+        max_supply?: number;
+        ath?: { usd?: number };
+        ath_change_percentage?: { usd?: number };
+        atl?: { usd?: number };
+      };
+      developer_data?: { stars?: number; forks?: number; commit_count_4_weeks?: number };
+      community_data?: { twitter_followers?: number; reddit_subscribers?: number };
+    };
+
+    const md = data.market_data;
+    const dev = data.developer_data;
+    const com = data.community_data;
+
+    return {
+      symbol: symbol.toUpperCase(),
+      name: data.name ?? symbol.toUpperCase(),
+      marketCapRank: data.market_cap_rank ?? null,
+      marketCapUsd: md?.market_cap?.usd ?? null,
+      circulatingSupply: md?.circulating_supply ?? null,
+      totalSupply: md?.total_supply ?? null,
+      maxSupply: md?.max_supply ?? null,
+      athUsd: md?.ath?.usd ?? null,
+      percentFromAth: md?.ath_change_percentage?.usd ?? null,
+      atlUsd: md?.atl?.usd ?? null,
+      categories: (data.categories ?? []).filter((c): c is string => !!c).slice(0, 6),
+      // Descriptions can run to many paragraphs of marketing copy.
+      description: data.description?.en ? data.description.en.slice(0, 600) : null,
+      developer: dev
+        ? {
+            stars: dev.stars ?? null,
+            forks: dev.forks ?? null,
+            commits4Weeks: dev.commit_count_4_weeks ?? null,
+          }
+        : null,
+      community: com
+        ? {
+            twitterFollowers: com.twitter_followers ?? null,
+            redditSubscribers: com.reddit_subscribers ?? null,
+          }
+        : null,
+    };
+  } catch {
+    return null;
+  }
+}

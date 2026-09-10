@@ -53,6 +53,21 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
   },
   {
+    name: "research_asset",
+    description:
+      "Get deeper context on a symbol from the Research Agent: news, fundamentals or crypto-native data, analyst views, and how this system's own past calls on it actually resolved. Use when the user asks WHY something is moving, wants the story/narrative behind a move, asks about news or fundamentals, or is weighing a decision. This is context, not technical analysis — pair it with get_market_data for price and indicators.",
+    parameters: {
+      type: "object",
+      properties: {
+        symbol: {
+          type: "string",
+          description: "Ticker symbol, e.g. BTC, VVV, SPY.",
+        },
+      },
+      required: ["symbol"],
+    },
+  },
+  {
     name: "manage_watchlist",
     description:
       "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and live signal monitoring, so 'add X to my daily briefing' means adding X to the watchlist. Adding is idempotent.",

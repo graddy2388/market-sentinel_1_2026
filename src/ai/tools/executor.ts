@@ -24,6 +24,7 @@ import {
   removeFromWatchlist,
   listWatchlist,
 } from "../../state/watchlist.js";
+import { researchSymbol } from "../../agents/research/agent.js";
 import { symbolSchema, thresholdSchema } from "../../validation.js";
 import { hasAnyAI } from "../../config.js";
 
@@ -300,6 +301,34 @@ async function listPositions(): Promise<ToolResult> {
   return { text: JSON.stringify({ count: summaries.length, positions: summaries }) };
 }
 
+async function researchAsset(input: Record<string, unknown>): Promise<ToolResult> {
+  const sym = parseSymbol(input.symbol);
+  if ("error" in sym) return fail(sym.error);
+  if (!hasAnyAI()) return fail("No AI models configured for research.");
+
+  const assessment = await researchSymbol(sym.symbol);
+
+  // Surfaced deliberately: disqualifiers are veto-grade, and the source list
+  // lets the model tell the user which inputs were actually available rather
+  // than implying full coverage.
+  return {
+    text: JSON.stringify({
+      symbol: assessment.symbol,
+      direction: assessment.direction,
+      confidence: assessment.confidence,
+      selfReportedConfidence: assessment.selfReportedConfidence,
+      dataQuality: assessment.dataQuality,
+      thesis: assessment.thesis,
+      supportingFacts: assessment.supportingFacts,
+      risks: assessment.risks,
+      disqualifiers: assessment.disqualifiers,
+      historicalContext: assessment.historicalContext,
+      sourcesUnavailable: assessment.sources.filter((s) => !s.available).map((s) => s.label),
+    }),
+    artifacts: { symbol: assessment.symbol },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -308,6 +337,7 @@ type ToolHandler = (input: Record<string, unknown>) => Promise<ToolResult>;
 
 const HANDLERS: Record<string, ToolHandler> = {
   get_market_data: getMarketData,
+  research_asset: researchAsset,
   run_analysis: runAnalysis,
   manage_watchlist: manageWatchlist,
   manage_alerts: manageAlerts,
