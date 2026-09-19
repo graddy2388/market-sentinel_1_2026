@@ -64,6 +64,28 @@ describe("hasSignalChanged", () => {
     expect(store.hasSignalChanged(prev, next)).toBe(false);
   });
 
+  it("never reports a first-ever HOLD — there is nothing to act on", () => {
+    expect(store.hasSignalChanged(null, makeSignal({ call: "HOLD", conviction: 0.1 }))).toBe(false);
+  });
+
+  it("ignores conviction movement within HOLD, however large", () => {
+    const prev = makeSignal({ call: "HOLD", conviction: 0.26 });
+    const next = makeSignal({ call: "HOLD", conviction: 0 });
+    expect(store.hasSignalChanged(prev, next)).toBe(false);
+  });
+
+  it("reports an actionable call dropping to HOLD — the setup is off", () => {
+    const prev = makeSignal({ call: "BUY", conviction: 0.4 });
+    const next = makeSignal({ call: "HOLD", conviction: 0.2 });
+    expect(store.hasSignalChanged(prev, next)).toBe(true);
+  });
+
+  it("reports HOLD becoming actionable", () => {
+    const prev = makeSignal({ call: "HOLD", conviction: 0.2 });
+    const next = makeSignal({ call: "BUY", conviction: 0.35 });
+    expect(store.hasSignalChanged(prev, next)).toBe(true);
+  });
+
   it("returns false for an identical signal", () => {
     const prev = makeSignal();
     const next = makeSignal();

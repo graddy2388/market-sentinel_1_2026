@@ -24,6 +24,7 @@ import { councilAnalyze } from "../ai/council.js";
 import { hasAnyAI } from "../config.js";
 import { scoreSignal } from "./scorer.js";
 import { getLatestSignal, insertSignal, hasSignalChanged } from "./store.js";
+import { isWatched } from "../state/watchlist.js";
 import { bus } from "../events/bus.js";
 import type { CouncilAnalysisResult } from "../ai/types.js";
 import type { GradedSignal } from "./scorer.js";
@@ -70,6 +71,11 @@ export async function evaluateSymbol(symbol: string): Promise<GradedSignal | nul
   inFlight.add(sym);
 
   try {
+    // The stream's symbol list is fixed at startup, so removing a coin from the
+    // watchlist used to change nothing until a restart. Checking here makes
+    // removal take effect on the next candle — and skips the council spend.
+    if (!(await isWatched(sym))) return null;
+
     const candles = await getHourlyCandles(sym);
     if (candles.length < MIN_CANDLES) return null;
 

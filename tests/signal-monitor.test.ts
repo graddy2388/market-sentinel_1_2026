@@ -51,6 +51,12 @@ vi.mock("../src/signals/store.js", async (importOriginal) => {
   };
 });
 
+let watched = true;
+const isWatchedMock = vi.fn(async () => watched);
+vi.mock("../src/state/watchlist.js", () => ({
+  isWatched: (...args: unknown[]) => isWatchedMock(...args),
+}));
+
 // Import AFTER mocks are registered.
 const { evaluateSymbol, isCouncilFresh, COUNCIL_TTL_MS, _resetMonitorState } = await import(
   "../src/signals/monitor.js"
@@ -91,6 +97,8 @@ beforeEach(() => {
   councilAnalyzeMock.mockReset();
   councilAnalyzeMock.mockResolvedValue(makeCouncil("bullish", 0.8));
   insertSignalMock.mockClear();
+  watched = true;
+  fetchCandlesCachedMock.mockClear();
 });
 
 describe("isCouncilFresh", () => {
@@ -161,6 +169,40 @@ describe("evaluateSymbol", () => {
 
     // Only the first call reached councilAnalyze.
     expect(councilAnalyzeMock).toHaveBeenCalledOnce();
+  });
+
+  it("stops evaluating a symbol as soon as it leaves the watchlist — no restart needed", async () => {
+    watched = false;
+    const emitted: GradedSignal[] = [];
+    const off = bus.onSignal((s) => emitted.push(s));
+
+    const result = await evaluateSymbol("XRP");
+
+    off();
+    expect(result).toBeNull();
+    expect(emitted).toHaveLength(0);
+    // Checked before any work: no candle fetch, no council spend.
+    expect(fetchCandlesCachedMock).not.toHaveBeenCalled();
+    expect(councilAnalyzeMock).not.toHaveBeenCalled();
+  });
+
+  it("does not post a HOLD whose conviction merely wobbled (the XRP 26% → 0% spam)", async () => {
+    storedPrevious = {
+      symbol: "BTC", call: "HOLD", conviction: 0.26, price: 100, entry: 100, stop: 97, target: 103,
+      rationale: "x", components: { technical: "neutral", ai: "bullish", agreement: false },
+      timestamp: Date.now(),
+    };
+    mockTechnical = makeTechnical("neutral", 0.15);
+    councilAnalyzeMock.mockResolvedValue(makeCouncil("neutral", 0.45)); // → HOLD @ 0%
+
+    const emitted: GradedSignal[] = [];
+    const off = bus.onSignal((s) => emitted.push(s));
+    const result = await evaluateSymbol("BTC");
+    off();
+
+    expect(result).toBeNull();
+    expect(emitted).toHaveLength(0);
+    expect(insertSignalMock).not.toHaveBeenCalled();
   });
 
   it("skips when not enough candles", async () => {

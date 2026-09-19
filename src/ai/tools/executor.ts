@@ -24,7 +24,7 @@ import {
   removeFromWatchlist,
   listWatchlist,
 } from "../../state/watchlist.js";
-import { researchSymbol } from "../../agents/research/agent.js";
+import { researchSymbol, describeSource } from "../../agents/research/agent.js";
 import { symbolSchema, thresholdSchema } from "../../validation.js";
 import { hasAnyAI } from "../../config.js";
 
@@ -323,7 +323,9 @@ async function researchAsset(input: Record<string, unknown>): Promise<ToolResult
       risks: assessment.risks,
       disqualifiers: assessment.disqualifiers,
       historicalContext: assessment.historicalContext,
-      sourcesUnavailable: assessment.sources.filter((s) => !s.available).map((s) => s.label),
+      // With reasons: "not configured" and "rate limited" are fixable on our
+      // side, and the model must not pass them off as the asset having no news.
+      sourcesUnavailable: assessment.sources.filter((s) => !s.available).map(describeSource),
     }),
     artifacts: { symbol: assessment.symbol },
   };

@@ -237,17 +237,26 @@ function signalCallEmoji(call: SignalCall): string {
 export function signalEmbed(signal: GradedSignal): EmbedBuilder {
   const label = signal.call.replace("_", " ");
   const emoji = signalCallEmoji(signal.call);
+  const isHold = signal.call === "HOLD";
+
+  // A HOLD has no trade behind it, so entry/stop/target would be fiction — and
+  // with conviction near zero the levels can even come out inverted.
+  const levelFields = isHold
+    ? [{ name: "Levels", value: "None — no trade setup", inline: true }]
+    : [
+        { name: "Entry", value: formatUsd(signal.entry), inline: true },
+        { name: "Stop", value: formatUsd(signal.stop), inline: true },
+        { name: "Target", value: formatUsd(signal.target), inline: true },
+      ];
 
   return new EmbedBuilder()
-    .setTitle(`${emoji} ${signal.symbol} — ${label}`)
+    .setTitle(`${emoji} ${signal.symbol} — ${isHold ? "signal cleared (HOLD)" : label}`)
     .setColor(signalCallColor(signal.call))
     .setDescription(signal.rationale)
     .addFields(
       { name: "Conviction", value: `${(signal.conviction * 100).toFixed(0)}%`, inline: true },
       { name: "Price", value: formatUsd(signal.price), inline: true },
-      { name: "Entry", value: formatUsd(signal.entry), inline: true },
-      { name: "Stop", value: formatUsd(signal.stop), inline: true },
-      { name: "Target", value: formatUsd(signal.target), inline: true },
+      ...levelFields,
       {
         name: "Source",
         value: signal.components.ai

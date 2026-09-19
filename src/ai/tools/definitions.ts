@@ -70,7 +70,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: "manage_watchlist",
     description:
-      "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and live signal monitoring, so 'add X to my daily briefing' means adding X to the watchlist. Adding is idempotent.",
+      "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and the automated signal posts (the 'X — BUY/SELL/HOLD' embeds), so 'add X to my daily briefing' means add, and 'stop the X alerts/signals' means remove. Removal takes effect on the next candle. Adding is idempotent.",
     parameters: {
       type: "object",
       properties: {
@@ -90,7 +90,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: "manage_alerts",
     description:
-      "List active price alerts, or create a new one. Alerts fire once when their condition is met and are then deactivated.",
+      "List active price alerts, or create a new one. Alerts fire once when their condition is met and are then deactivated. These are user-set price/RSI triggers only — the automated signal posts are controlled by the watchlist (manage_watchlist), not here.",
     parameters: {
       type: "object",
       properties: {

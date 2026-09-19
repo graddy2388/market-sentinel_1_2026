@@ -85,6 +85,10 @@ export async function getAllLatestSignals(): Promise<GradedSignal[]> {
  * larger than the threshold for the same call. First-ever signal always counts.
  */
 export function hasSignalChanged(prev: GradedSignal | null, next: GradedSignal): boolean {
+  // HOLD means conviction sits below the action threshold — there's nothing to
+  // act on, so movement *within* HOLD (26% → 0%) is noise, not news. Only a move
+  // out of an actionable call into HOLD is worth reporting: "the BUY is off".
+  if (next.call === "HOLD" && (!prev || prev.call === "HOLD")) return false;
   if (!prev) return true;
   if (prev.call !== next.call) return true;
   if (Math.abs(next.conviction - prev.conviction) > CONVICTION_DELTA_THRESHOLD) return true;

@@ -32,9 +32,11 @@ vi.mock("../src/data/providers.js", () => ({
 }));
 
 let coinContextAvailable = true;
+let coinContextError: Error | null = null;
 vi.mock("../src/data/coingecko.js", () => ({
-  fetchCoinContext: vi.fn(async () =>
-    coinContextAvailable
+  fetchCoinContext: vi.fn(async () => {
+    if (coinContextError) throw coinContextError;
+    return coinContextAvailable
       ? {
           symbol: "VVV", name: "Venice Token", marketCapRank: 87,
           marketCapUsd: 500_000_000, circulatingSupply: 1000, totalSupply: 2000,
@@ -43,8 +45,8 @@ vi.mock("../src/data/coingecko.js", () => ({
           developer: { stars: 100, forks: 10, commits4Weeks: 20 },
           community: { twitterFollowers: 5000, redditSubscribers: 100 },
         }
-      : null
-  ),
+      : null;
+  }),
 }));
 
 let newsCount = 5;
@@ -94,6 +96,7 @@ beforeEach(() => {
   claudeAvailable = true;
   market = "crypto";
   coinContextAvailable = true;
+  coinContextError = null;
   newsCount = 5;
   newsConfigured = true;
   gradedCount = 12;
@@ -164,6 +167,38 @@ describe("veto channel and transparency", () => {
     expect(unavailable.length).toBeGreaterThan(0);
     // Web research is never silently claimed as a source.
     expect(unavailable).toContain("LLM web research");
+  });
+
+  it("says WHY coin context is missing when CoinGecko rate-limited us", async () => {
+    coinContextError = new Error("CoinGecko rate limit hit (no COINGECKO_API_KEY set)");
+
+    const result = await researchSymbol("VVV");
+    const source = result.sources.find((s) => s.label === "CoinGecko coin context");
+
+    expect(source?.available).toBe(false);
+    expect(source?.note).toContain("rate limit");
+    // And it degrades gracefully rather than failing the whole assessment.
+    expect(result.direction).toBe("bullish");
+  });
+
+  it("distinguishes a coin CoinGecko doesn't rank from a failed lookup", async () => {
+    coinContextAvailable = false;
+
+    const result = await researchSymbol("VVV");
+    const source = result.sources.find((s) => s.label === "CoinGecko coin context");
+
+    expect(source?.note).toBe("Not a ranked coin on CoinGecko");
+  });
+
+  it("tells the model a data gap is ours, not the asset's", async () => {
+    newsConfigured = false;
+    newsCount = 0;
+
+    await researchSymbol("VVV");
+    const prompt = chatWithClaudeMock.mock.calls[0][1] as string;
+
+    expect(prompt).toContain("FINNHUB_API_KEY not configured");
+    expect(prompt).toContain("not evidence about the asset");
   });
 
   it("carries the direction and thesis through", async () => {

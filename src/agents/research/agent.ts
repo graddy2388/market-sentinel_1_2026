@@ -116,6 +116,11 @@ function summarizeBacktest(bt: BacktestSummary): string {
     .join(" ");
 }
 
+/** "Label: reason" — the reason is what tells a user whether to fix config or shrug. */
+export function describeSource(source: ResearchSource): string {
+  return source.note ? `${source.label}: ${source.note}` : source.label;
+}
+
 /**
  * Measured quality of the evidence actually gathered, 0-1.
  * Used to cap self-reported confidence.
@@ -177,8 +182,24 @@ export async function researchSymbol(symbol: string): Promise<ResearchAssessment
 
   const sources: ResearchSource[] = [];
 
+  // "Couldn't look" and "nothing to find" must not be conflated: the first is
+  // our problem, the second says something about the asset.
+  let coinContextNote: string | undefined;
+  const coinContextRequest = isCrypto
+    ? fetchCoinContext(sym).then(
+        (ctx) => {
+          if (!ctx) coinContextNote = "Not a ranked coin on CoinGecko";
+          return ctx;
+        },
+        (err: unknown) => {
+          coinContextNote = err instanceof Error ? err.message : "CoinGecko request failed";
+          return null;
+        }
+      )
+    : Promise.resolve(null);
+
   const [coinContext, news, recommendations, fundamentals, earnings, backtest] = await Promise.all([
-    isCrypto ? fetchCoinContext(sym).catch(() => null) : Promise.resolve(null),
+    coinContextRequest,
     isNewsAvailable()
       ? (isCrypto ? fetchMarketNews("crypto") : fetchCompanyNews(sym)).catch(() => [])
       : Promise.resolve([] as NewsArticle[]),
@@ -197,7 +218,11 @@ export async function researchSymbol(symbol: string): Promise<ResearchAssessment
   sources.push({
     label: isCrypto ? "CoinGecko coin context" : "Finnhub fundamentals",
     available: isCrypto ? coinContext !== null : fundamentals !== null,
-    note: !isCrypto && fundamentals === null ? "May be premium-gated on this plan" : undefined,
+    note: isCrypto
+      ? coinContextNote
+      : fundamentals === null
+        ? isNewsAvailable() ? "May be premium-gated on this plan" : "FINNHUB_API_KEY not configured"
+        : undefined,
   });
   sources.push({
     label: isCrypto ? "Crypto market news" : "Company news",
@@ -211,16 +236,20 @@ export async function researchSymbol(symbol: string): Promise<ResearchAssessment
   sources.push({
     label: "LLM web research",
     available: false,
-    note: "Not configured — needs a search API key (see notes)",
+    note: "Not configured — needs a search API key",
   });
 
   // --- Build the prompt from whatever was actually gathered ---
   const sections: string[] = [`## Symbol\n${sym} (${market ?? "unknown market"})`];
 
   if (coinContext) {
+    const ageMinutes =
+      coinContext.fetchedAt != null ? Math.round((Date.now() - coinContext.fetchedAt) / 60_000) : 0;
     sections.push(
       [
         "## Coin context",
+        // Served from cache after a failed refresh — say so rather than pass it off as live.
+        ageMinutes > 15 ? `(Cached copy from ${ageMinutes} minutes ago — CoinGecko was unreachable.)` : "",
         `Name: ${coinContext.name}`,
         `Market cap rank: ${coinContext.marketCapRank ?? "unranked"}`,
         `Market cap: ${coinContext.marketCapUsd != null ? `$${Math.round(coinContext.marketCapUsd).toLocaleString()}` : "unknown"}`,
@@ -265,11 +294,12 @@ export async function researchSymbol(symbol: string): Promise<ResearchAssessment
   sections.push(`## Recent news\n${summarizeArticles(news)}`);
   sections.push(`## Historical performance of this system's own calls\n${summarizeBacktest(backtest)}`);
 
-  const unavailable = sources.filter((s) => !s.available).map((s) => s.label);
+  const unavailable = sources.filter((s) => !s.available).map(describeSource);
   if (unavailable.length > 0) {
     sections.push(
-      `## Data gaps\nThese sources returned nothing: ${unavailable.join(", ")}. ` +
-        `Lower your confidence accordingly.`
+      `## Data gaps\nThese sources returned nothing: ${unavailable.join("; ")}. ` +
+        `Lower your confidence accordingly. A source we couldn't reach is a gap in ` +
+        `our data, not evidence about the asset.`
     );
   }
 

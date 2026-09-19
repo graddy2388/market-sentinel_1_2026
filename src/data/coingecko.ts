@@ -100,6 +100,20 @@ interface SearchCoin {
  * then a ranked /search lookup. Results are cached, including misses.
  */
 export async function resolveCoinId(symbol: string): Promise<string | null> {
+  try {
+    return await lookupCoinId(symbol);
+  } catch {
+    // Don't cache transient failures — a rate limit shouldn't permanently
+    // blacklist a real coin.
+    return null;
+  }
+}
+
+/**
+ * Like resolveCoinId, but throws on transient failure instead of returning
+ * null, so callers can tell "not a coin" apart from "couldn't look".
+ */
+async function lookupCoinId(symbol: string): Promise<string | null> {
   const upper = symbol.toUpperCase();
 
   const curated = SYMBOL_TO_ID[upper];
@@ -107,23 +121,17 @@ export async function resolveCoinId(symbol: string): Promise<string | null> {
 
   if (dynamicIdCache.has(upper)) return dynamicIdCache.get(upper)!;
 
-  try {
-    const data = (await cgFetch(`/search?query=${encodeURIComponent(upper)}`)) as {
-      coins?: SearchCoin[];
-    };
-    const ranked = (data.coins ?? [])
-      .filter((c) => c.symbol?.toUpperCase() === upper && c.market_cap_rank != null)
-      .sort((a, b) => (a.market_cap_rank ?? Infinity) - (b.market_cap_rank ?? Infinity));
+  const data = (await cgFetch(`/search?query=${encodeURIComponent(upper)}`)) as {
+    coins?: SearchCoin[];
+  };
+  const ranked = (data.coins ?? [])
+    .filter((c) => c.symbol?.toUpperCase() === upper && c.market_cap_rank != null)
+    .sort((a, b) => (a.market_cap_rank ?? Infinity) - (b.market_cap_rank ?? Infinity));
 
-    const id = ranked[0]?.id ?? null;
-    dynamicIdCache.set(upper, id);
-    if (id) discoveredSymbols.add(upper);
-    return id;
-  } catch {
-    // Don't cache transient failures — a rate limit shouldn't permanently
-    // blacklist a real coin.
-    return null;
-  }
+  const id = ranked[0]?.id ?? null;
+  dynamicIdCache.set(upper, id);
+  if (id) discoveredSymbols.add(upper);
+  return id;
 }
 
 /** Symbols resolved dynamically so far (used to widen symbol detection). */
@@ -135,15 +143,55 @@ export function getDiscoveredSymbols(): string[] {
 export function _resetDynamicCache(): void {
   dynamicIdCache.clear();
   discoveredSymbols.clear();
+  coinContextCache.clear();
 }
 
+// ---------------------------------------------------------------------------
+// Transport
+//
+// Keyless access allows only a few calls per minute, then answers 429 with
+// Retry-After: 60. Coins that aren't on Binance (VVV and most small caps) route
+// price, candles, and research context all through CoinGecko, so one chat turn
+// can exhaust the budget. A free Demo key raises the limit to ~30/min.
+// ---------------------------------------------------------------------------
+
+/** Read at call time so dotenv has already populated the environment. */
+function apiKey(): string | undefined {
+  return process.env.COINGECKO_API_KEY || undefined;
+}
+
+/** A failed CoinGecko request. The message is written to be shown to a user. */
+export class CoinGeckoError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "CoinGeckoError";
+  }
+}
+
+/** Throttles the rate-limit warning so a polling loop can't flood the logs. */
+let lastRateLimitWarning = 0;
+
 async function cgFetch(path: string): Promise<unknown> {
+  const key = apiKey();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (key) headers["x-cg-demo-api-key"] = key;
+
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { Accept: "application/json" },
+    headers,
     signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) {
-    throw new Error(`CoinGecko API error: ${res.status} ${res.statusText}`);
+    if (res.status === 429) {
+      const message = key
+        ? "CoinGecko rate limit hit"
+        : "CoinGecko rate limit hit (no COINGECKO_API_KEY set — keyless access allows only a few calls per minute)";
+      if (Date.now() - lastRateLimitWarning > 60_000) {
+        lastRateLimitWarning = Date.now();
+        console.warn(`[CoinGecko] ${message}`);
+      }
+      throw new CoinGeckoError(429, message);
+    }
+    throw new CoinGeckoError(res.status, `CoinGecko API error: ${res.status} ${res.statusText}`);
   }
   return res.json();
 }
@@ -340,67 +388,97 @@ export interface CoinContext {
   description: string | null;
   developer: { stars: number | null; forks: number | null; commits4Weeks: number | null } | null;
   community: { twitterFollowers: number | null; redditSubscribers: number | null } | null;
+  /** When this was fetched. Older than a few minutes means it was served stale. */
+  fetchedAt?: number;
 }
 
+/** Rank, supply, and categories barely move minute to minute. */
+const COIN_CONTEXT_TTL_MS = 10 * 60_000;
+/** On a failed refresh, a copy this recent still beats reporting nothing. */
+const COIN_CONTEXT_STALE_LIMIT_MS = 6 * 3_600_000;
+
+const coinContextCache = new Map<string, CoinContext>();
+
+/**
+ * Crypto-native context for a coin.
+ *
+ * Returns null when the symbol isn't a ranked CoinGecko coin. Throws a
+ * CoinGeckoError when CoinGecko can't be reached (rate limit, outage) and no
+ * usable cached copy exists — so callers can tell "nothing to find" apart
+ * from "couldn't look".
+ */
 export async function fetchCoinContext(symbol: string): Promise<CoinContext | null> {
-  const id = await resolveCoinId(symbol);
-  if (!id) return null;
+  const upper = symbol.toUpperCase();
+  const cached = coinContextCache.get(upper);
+  const cachedAge = cached?.fetchedAt != null ? Date.now() - cached.fetchedAt : Infinity;
+  if (cached && cachedAge < COIN_CONTEXT_TTL_MS) return cached;
 
   try {
-    const data = (await cgFetch(
-      `/coins/${id}?localization=false&tickers=false&market_data=true` +
-        `&community_data=true&developer_data=true&sparkline=false`
-    )) as {
-      name?: string;
-      categories?: (string | null)[];
-      description?: { en?: string };
-      market_cap_rank?: number;
-      market_data?: {
-        market_cap?: { usd?: number };
-        circulating_supply?: number;
-        total_supply?: number;
-        max_supply?: number;
-        ath?: { usd?: number };
-        ath_change_percentage?: { usd?: number };
-        atl?: { usd?: number };
-      };
-      developer_data?: { stars?: number; forks?: number; commit_count_4_weeks?: number };
-      community_data?: { twitter_followers?: number; reddit_subscribers?: number };
-    };
+    const id = await lookupCoinId(upper);
+    if (!id) return null;
 
-    const md = data.market_data;
-    const dev = data.developer_data;
-    const com = data.community_data;
-
-    return {
-      symbol: symbol.toUpperCase(),
-      name: data.name ?? symbol.toUpperCase(),
-      marketCapRank: data.market_cap_rank ?? null,
-      marketCapUsd: md?.market_cap?.usd ?? null,
-      circulatingSupply: md?.circulating_supply ?? null,
-      totalSupply: md?.total_supply ?? null,
-      maxSupply: md?.max_supply ?? null,
-      athUsd: md?.ath?.usd ?? null,
-      percentFromAth: md?.ath_change_percentage?.usd ?? null,
-      atlUsd: md?.atl?.usd ?? null,
-      categories: (data.categories ?? []).filter((c): c is string => !!c).slice(0, 6),
-      // Descriptions can run to many paragraphs of marketing copy.
-      description: data.description?.en ? data.description.en.slice(0, 600) : null,
-      developer: dev
-        ? {
-            stars: dev.stars ?? null,
-            forks: dev.forks ?? null,
-            commits4Weeks: dev.commit_count_4_weeks ?? null,
-          }
-        : null,
-      community: com
-        ? {
-            twitterFollowers: com.twitter_followers ?? null,
-            redditSubscribers: com.reddit_subscribers ?? null,
-          }
-        : null,
-    };
-  } catch {
-    return null;
+    const context = await fetchCoinContextById(upper, id);
+    coinContextCache.set(upper, context);
+    return context;
+  } catch (err) {
+    if (cached && cachedAge < COIN_CONTEXT_STALE_LIMIT_MS) return cached;
+    throw err;
   }
+}
+
+async function fetchCoinContextById(symbol: string, id: string): Promise<CoinContext> {
+  const data = (await cgFetch(
+    `/coins/${id}?localization=false&tickers=false&market_data=true` +
+      `&community_data=true&developer_data=true&sparkline=false`
+  )) as {
+    name?: string;
+    categories?: (string | null)[];
+    description?: { en?: string };
+    market_cap_rank?: number;
+    market_data?: {
+      market_cap?: { usd?: number };
+      circulating_supply?: number;
+      total_supply?: number;
+      max_supply?: number;
+      ath?: { usd?: number };
+      ath_change_percentage?: { usd?: number };
+      atl?: { usd?: number };
+    };
+    developer_data?: { stars?: number; forks?: number; commit_count_4_weeks?: number };
+    community_data?: { twitter_followers?: number; reddit_subscribers?: number };
+  };
+
+  const md = data.market_data;
+  const dev = data.developer_data;
+  const com = data.community_data;
+
+  return {
+    symbol: symbol.toUpperCase(),
+    name: data.name ?? symbol.toUpperCase(),
+    marketCapRank: data.market_cap_rank ?? null,
+    marketCapUsd: md?.market_cap?.usd ?? null,
+    circulatingSupply: md?.circulating_supply ?? null,
+    totalSupply: md?.total_supply ?? null,
+    maxSupply: md?.max_supply ?? null,
+    athUsd: md?.ath?.usd ?? null,
+    percentFromAth: md?.ath_change_percentage?.usd ?? null,
+    atlUsd: md?.atl?.usd ?? null,
+    categories: (data.categories ?? []).filter((c): c is string => !!c).slice(0, 6),
+    // Descriptions can run to many paragraphs of marketing copy.
+    description: data.description?.en ? data.description.en.slice(0, 600) : null,
+    developer: dev
+      ? {
+          stars: dev.stars ?? null,
+          forks: dev.forks ?? null,
+          commits4Weeks: dev.commit_count_4_weeks ?? null,
+        }
+      : null,
+    community: com
+      ? {
+          twitterFollowers: com.twitter_followers ?? null,
+          redditSubscribers: com.reddit_subscribers ?? null,
+        }
+      : null,
+    fetchedAt: Date.now(),
+  };
 }
