@@ -26,6 +26,7 @@ import {
 } from "../../state/watchlist.js";
 import { researchSymbol, describeSource } from "../../agents/research/agent.js";
 import { startWatch, stopWatch, listActiveWatches, DEFAULT_WATCH_MINUTES } from "../../state/watches.js";
+import { evaluateSymbol } from "../../signals/monitor.js";
 import { countHeldNotices, isQuietHour } from "../../notifications/gate.js";
 import { proposeTrade } from "../../agents/orchestrator.js";
 import { listDecisionRecords } from "../../state/proposals.js";
@@ -489,6 +490,13 @@ async function manageWatches(input: Record<string, unknown>): Promise<ToolResult
     }
 
     const watch = await startWatch(sym.symbol, { durationMinutes });
+
+    // Score it now rather than making the user wait for the next sweep. Not
+    // awaited: the council can take ~10s, and the reply shouldn't block on it.
+    void evaluateSymbol(watch.symbol).catch((err) =>
+      console.error(`[Tools] First scoring pass for ${watch.symbol} failed:`, err)
+    );
+
     return {
       text: JSON.stringify({
         action: "start",

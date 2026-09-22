@@ -53,9 +53,6 @@ vi.mock("../src/signals/store.js", async (importOriginal) => {
   };
 });
 
-let watched = true;
-const isWatchedMock = vi.fn(async () => watched);
-let watchlistEntries: Array<{ symbol: string; market: string; addedAt: string }> = [];
 // Live watches: the only thing that makes a signal reach Discord, and they
 // also pull a symbol into the sweep even when it isn't on the watchlist.
 let activeWatches: Array<{ symbol: string; expiresAt: number | null }> = [];
@@ -64,10 +61,6 @@ vi.mock("../src/state/watches.js", () => ({
     activeWatches.some((w) => w.symbol === sym.toUpperCase())
   ),
   listActiveWatches: vi.fn(async () => activeWatches),
-}));
-vi.mock("../src/state/watchlist.js", () => ({
-  isWatched: (...args: unknown[]) => isWatchedMock(...args),
-  listWatchlist: vi.fn(async () => watchlistEntries),
 }));
 
 // Import AFTER mocks are registered.
@@ -110,10 +103,8 @@ beforeEach(() => {
   councilAnalyzeMock.mockReset();
   councilAnalyzeMock.mockResolvedValue(makeCouncil("bullish", 0.8));
   insertSignalMock.mockClear();
-  watched = true;
   fetchCandlesCachedMock.mockClear();
-  watchlistEntries = [];
-  activeWatches = [];
+  activeWatches = [{ symbol: "BTC", expiresAt: null }];
   cryptoSources.clear();
 });
 
@@ -187,8 +178,8 @@ describe("evaluateSymbol", () => {
     expect(councilAnalyzeMock).toHaveBeenCalledOnce();
   });
 
-  it("stops evaluating a symbol as soon as it leaves the watchlist — no restart needed", async () => {
-    watched = false;
+  it("won't evaluate a symbol nobody is watching — no candle fetch, no council spend", async () => {
+    activeWatches = [];
     const emitted: GradedSignal[] = [];
     const off = bus.onSignal((s) => emitted.push(s));
 
@@ -229,59 +220,64 @@ describe("evaluateSymbol", () => {
   });
 });
 
-describe("runSweep — scores whatever is on the watchlist right now", () => {
-  const entry = (symbol: string, market = "crypto") => ({ symbol, market, addedAt: "" });
+describe("runSweep — scores what is being watched, and nothing else", () => {
   const sweptSymbols = () => fetchCandlesCachedMock.mock.calls.map((c) => c[0]);
+  const watching = (...symbols: string[]) =>
+    symbols.map((symbol) => ({ symbol, expiresAt: null as number | null }));
 
-  it("scores every crypto symbol, including ones with no Binance pair (VVV)", async () => {
-    watchlistEntries = [entry("XRP"), entry("VVV")];
+  it("scores nothing at all when nothing is watched — the whole point", async () => {
+    activeWatches = [];
+
+    const pushed = await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toEqual([]);
+    expect(councilAnalyzeMock).not.toHaveBeenCalled();
+    expect(pushed).toEqual([]);
+  });
+
+  it("scores every watched symbol, including ones with no Binance pair (VVV)", async () => {
+    activeWatches = watching("XRP", "VVV");
 
     await runSweep({ staggerMs: 0 });
 
     expect(sweptSymbols()).toEqual(["XRP", "VVV"]);
   });
 
-  it("skips stocks — there are no candles to score them from yet", async () => {
-    watchlistEntries = [entry("BTC"), entry("SPY", "stock")];
-
+  it("stops scoring a symbol once its watch ends", async () => {
+    activeWatches = watching("BTC");
     await runSweep({ staggerMs: 0 });
-
     expect(sweptSymbols()).toEqual(["BTC"]);
-  });
 
-  it("scores a coin that is only under a watch, not on the watchlist", async () => {
-    watchlistEntries = [];
-    activeWatches = [{ symbol: "PEPE", expiresAt: Date.now() + 3_600_000 }];
-
+    activeWatches = [];
+    fetchCandlesCachedMock.mockClear();
     await runSweep({ staggerMs: 0 });
 
-    expect(sweptSymbols()).toEqual(["PEPE"]);
+    expect(sweptSymbols()).toEqual([]);
   });
 
-  it("doesn't score the same coin twice when it's both listed and watched", async () => {
-    watchlistEntries = [entry("BTC")];
-    activeWatches = [{ symbol: "BTC", expiresAt: null }];
-
+  it("picks up a watch started between sweeps, with no restart", async () => {
+    activeWatches = watching("BTC");
     await runSweep({ staggerMs: 0 });
 
-    expect(sweptSymbols()).toEqual(["BTC"]);
-  });
-
-  it("picks up a coin added between sweeps, with no restart", async () => {
-    watchlistEntries = [entry("BTC")];
-    await runSweep({ staggerMs: 0 });
-
-    watchlistEntries = [entry("BTC"), entry("VVV")];
+    activeWatches = watching("BTC", "VVV");
     fetchCandlesCachedMock.mockClear();
     await runSweep({ staggerMs: 0 });
 
     expect(sweptSymbols()).toContain("VVV");
   });
 
+  it("scores a symbol only once even if it somehow appears twice", async () => {
+    activeWatches = watching("BTC", "BTC");
+
+    await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toEqual(["BTC"]);
+  });
+
   it("paces CoinGecko-backed coins so they don't drain that budget", async () => {
     cryptoSources.set("VVV", "coingecko");
     cryptoSources.set("BTC", "binance");
-    watchlistEntries = [entry("BTC"), entry("VVV")];
+    activeWatches = watching("BTC", "VVV");
 
     await runSweep({ staggerMs: 0 });
     expect(sweptSymbols()).toEqual(["BTC", "VVV"]);
@@ -299,7 +295,7 @@ describe("runSweep — scores whatever is on the watchlist right now", () => {
   });
 
   it("returns the signals it pushed", async () => {
-    watchlistEntries = [entry("BTC")];
+    activeWatches = watching("BTC");
 
     const pushed = await runSweep({ staggerMs: 0 });
 
@@ -309,7 +305,7 @@ describe("runSweep — scores whatever is on the watchlist right now", () => {
 
   it("keeps going when one symbol fails", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    watchlistEntries = [entry("BAD"), entry("BTC")];
+    activeWatches = watching("BAD", "BTC");
     fetchCandlesCachedMock.mockImplementationOnce(async () => {
       throw new Error("provider down");
     });
@@ -321,7 +317,7 @@ describe("runSweep — scores whatever is on the watchlist right now", () => {
   });
 
   it("won't start a second sweep while one is running", async () => {
-    watchlistEntries = [entry("BTC")];
+    activeWatches = watching("BTC");
     let release!: (v: unknown) => void;
     councilAnalyzeMock.mockReturnValue(new Promise((r) => { release = r; }));
 

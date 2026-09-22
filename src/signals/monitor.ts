@@ -1,20 +1,29 @@
 /**
  * Signal monitor.
  *
- * Every SWEEP_INTERVAL_MS it reads the watchlist and re-scores each crypto
- * symbol's graded signal. If a live DataManager is supplied, its ticks are
- * forwarded to the event bus for the dashboard.
+ * Every SWEEP_INTERVAL_MS it re-scores the symbols under an active watch. If a
+ * live DataManager is supplied, its ticks are forwarded to the bus for the
+ * dashboard.
+ *
+ * Scoring follows WATCHES, not the watchlist. Background scoring of the whole
+ * watchlist ran the 7-model council around the clock for signals nobody had
+ * asked to hear about — the cost of the system with nobody watching. With no
+ * active watch, a sweep does nothing and costs nothing. The watchlist still
+ * feeds the daily briefing, which computes its own technicals and needs no
+ * council. On-demand paths (chat, the trade review) call assessSymbol directly
+ * and are unaffected.
+ *
+ * The tradeoff, accepted deliberately: decision records only accumulate while
+ * something is watched or when a review is requested, so evidence for judging
+ * the pipeline builds more slowly.
  *
  * Why a sweep and not the Binance stream: evaluation used to fire on each
  * closed 1-minute candle from the stream, whose symbol list is fixed at
  * startup. Coins without a Binance pair (VVV) were never scored at all, and
- * coins added later weren't scored until a restart. The sweep reads the
- * watchlist every time and uses the provider router, so any coin with candle
- * data — Binance or CoinGecko — is covered. Posting is throttled to hourly
- * anyway (see hasSignalChanged), so 1-minute evaluation bought nothing.
- *
- * Stocks are left out: Finnhub's candle endpoint is premium-gated on the free
- * plan, so there's nothing to score them from yet.
+ * coins added later weren't scored until a restart. The sweep reads current
+ * state every time and uses the provider router, so any coin with candle data
+ * — Binance or CoinGecko — is covered. Posting is throttled to hourly anyway
+ * (see hasSignalChanged), so 1-minute evaluation bought nothing.
  *
  * Cost control:
  * - The technical read is recomputed each sweep (cheap, local).
@@ -22,7 +31,7 @@
  *   fresher cached council is reused. A council that returns zero votes (all
  *   providers failed) is treated as absent.
  * - A per-symbol in-flight guard prevents overlapping evaluations, and symbols
- *   within a sweep are staggered so a long watchlist doesn't burst providers.
+ *   within a sweep are staggered so several watches don't burst providers.
  * - Pushes are gated by hasSignalChanged.
  */
 import type { DataManager } from "../data/manager.js";
@@ -33,7 +42,6 @@ import { councilAnalyze } from "../ai/council.js";
 import { hasAnyAI } from "../config.js";
 import { scoreSignal } from "./scorer.js";
 import { getLatestSignal, insertSignal, hasSignalChanged } from "./store.js";
-import { isWatched, listWatchlist } from "../state/watchlist.js";
 import { isBeingWatched, listActiveWatches } from "../state/watches.js";
 import { bus } from "../events/bus.js";
 import type { CouncilAnalysisResult } from "../ai/types.js";
@@ -142,10 +150,9 @@ export async function evaluateSymbol(symbol: string): Promise<GradedSignal | nul
   inFlight.add(sym);
 
   try {
-    // Checked before any work, so removing a coin takes effect on the next
-    // sweep — and skips the council spend. An active watch counts too, so you
-    // can watch something that isn't on the briefing list.
-    if (!(await isWatched(sym)) && !(await isBeingWatched(sym))) return null;
+    // Checked before any work, so stopping a watch takes effect on the next
+    // sweep — and skips the council spend.
+    if (!(await isBeingWatched(sym))) return null;
 
     const assessment = await assessSymbol(sym);
     if (!assessment) return null;
@@ -185,13 +192,8 @@ export async function runSweep(
   const staggerMs = opts.staggerMs ?? SWEEP_STAGGER_MS;
 
   try {
-    // Watchlist coins (for the briefing and decision records) plus anything
-    // under an active watch, which may not be on the list at all.
-    const listed = (await listWatchlist())
-      .filter((entry) => entry.market === "crypto")
-      .map((entry) => entry.symbol.toUpperCase());
-    const watched = (await listActiveWatches()).map((w) => w.symbol);
-    const symbols = [...new Set([...listed, ...watched])];
+    // Only what's being watched. Nothing watched, nothing scored, nothing spent.
+    const symbols = [...new Set((await listActiveWatches()).map((w) => w.symbol))];
 
     const pushed: GradedSignal[] = [];
     for (let i = 0; i < symbols.length; i++) {

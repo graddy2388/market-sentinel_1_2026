@@ -117,7 +117,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: "manage_watchlist",
     description:
-      "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and keeps a symbol scored in the background — it does NOT cause alerts on its own. To be pinged about a symbol, start a watch with manage_watches; 'alert me about X' or 'stop the X alerts' is manage_watches, not this. Adding is idempotent.",
+      "List, add to, or remove from the user's watchlist. The watchlist only decides what appears in the daily briefing — it does NOT cause alerts and does not keep anything scored. To be pinged about a symbol, or to have it monitored at all, start a watch with manage_watches; 'alert me about X' or 'stop the X alerts' is manage_watches, not this. Adding is idempotent.",
     parameters: {
       type: "object",
       properties: {
