@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { appConfig } from "../config.js";
 import { analysisResponseSchema, critiqueResponseSchema } from "./types.js";
 import { tracked } from "./health.js";
+import { MODELS } from "./models.js";
 import type { AnalysisResponse, CritiqueResponse } from "./types.js";
 
 let client: OpenAI | null = null;
@@ -29,7 +30,7 @@ const AI_CALL_TIMEOUT_MS = 30_000;
 async function chatCompletion(prompt: string): Promise<string> {
   const response = await createCompletion(
     {
-      model: "gpt-4o",
+      model: MODELS.openai,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
       max_tokens: 1000,
@@ -62,7 +63,7 @@ export async function chatWithOpenAI(
 ): Promise<string> {
   const response = await createCompletion(
     {
-      model: "gpt-4o",
+      model: MODELS.openai,
       messages: [
         { role: "system", content: systemPrompt },
         ...history,
@@ -95,7 +96,7 @@ export async function chatWithOpenAIVision(
 
   const response = await createCompletion(
     {
-      model: "gpt-4o",
+      model: MODELS.openai,
       messages: [
         { role: "system", content: systemPrompt },
         {
@@ -125,7 +126,7 @@ export async function openaiToolTurn(
 ): Promise<OpenAI.Chat.ChatCompletionMessage> {
   const response = await createCompletion(
     {
-      model: "gpt-4o",
+      model: MODELS.openai,
       messages,
       tools,
       temperature: 0.3,

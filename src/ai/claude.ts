@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { appConfig } from "../config.js";
 import { analysisResponseSchema, critiqueResponseSchema } from "./types.js";
 import { safeFetchImage } from "./safe-fetch.js";
+import { MODELS } from "./models.js";
 import type { AnalysisResponse, CritiqueResponse } from "./types.js";
 import { tracked } from "./health.js";
 
@@ -19,6 +20,23 @@ function getClient(): Anthropic {
 
 const AI_CALL_TIMEOUT_MS = 30_000;
 
+/**
+ * Thinking is on by default on current Claude models. These calls want a
+ * short structured answer, so it is disabled explicitly: thinking tokens bill
+ * as output, and a thinking block would arrive where text is expected.
+ */
+const NO_THINKING = { type: "disabled" } as const;
+
+/**
+ * First text block, not the first block. With thinking enabled the first block
+ * is a thinking block, and reading content[0] would throw on a valid reply.
+ */
+export function firstText(content: Anthropic.ContentBlock[]): string {
+  const block = content.find((b): b is Anthropic.TextBlock => b.type === "text");
+  if (!block) throw new Error("No text block in Claude response");
+  return block.text;
+}
+
 /** Every Claude call goes through here so provider health sees it. */
 function createMessage(
   body: Anthropic.MessageCreateParamsNonStreaming,
@@ -30,15 +48,14 @@ function createMessage(
 async function chatCompletion(prompt: string): Promise<string> {
   const response = await createMessage(
     {
-      model: "claude-sonnet-4-6",
+      model: MODELS.claude,
+      thinking: NO_THINKING,
       max_tokens: 1000,
       messages: [{ role: "user", content: prompt }],
     },
     { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
   );
-  const block = response.content[0];
-  if (block.type !== "text") throw new Error("Unexpected response type");
-  return block.text;
+  return firstText(response.content);
 }
 
 function parseJson<T>(raw: string, schema: { parse: (v: unknown) => T }): T {
@@ -64,16 +81,15 @@ export async function chatWithClaude(
 ): Promise<string> {
   const response = await createMessage(
     {
-      model: "claude-sonnet-4-6",
+      model: MODELS.claude,
+      thinking: NO_THINKING,
       max_tokens: maxTokens,
       system: systemPrompt,
       messages: [...history, { role: "user" as const, content: userMessage }],
     },
     { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
   );
-  const block = response.content[0];
-  if (block.type !== "text") throw new Error("Unexpected response type");
-  return block.text;
+  return firstText(response.content);
 }
 
 export async function chatWithClaudeVision(
@@ -87,7 +103,8 @@ export async function chatWithClaudeVision(
 
   const response = await createMessage(
     {
-      model: "claude-sonnet-4-6",
+      model: MODELS.claude,
+      thinking: NO_THINKING,
       max_tokens: 1500,
       system: systemPrompt,
       messages: [
@@ -105,9 +122,7 @@ export async function chatWithClaudeVision(
     },
     { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
   );
-  const block = response.content[0];
-  if (block.type !== "text") throw new Error("Unexpected response type");
-  return block.text;
+  return firstText(response.content);
 }
 
 /**
@@ -122,7 +137,8 @@ export async function claudeToolTurn(
 ): Promise<Anthropic.Message> {
   return createMessage(
     {
-      model: "claude-sonnet-4-6",
+      model: MODELS.claude,
+      thinking: NO_THINKING,
       max_tokens: maxTokens,
       system,
       messages,

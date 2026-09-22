@@ -13,6 +13,8 @@ import type {
   ModelError,
 } from "./types.js";
 import type { TechnicalSummary } from "../analysis/types.js";
+import { MODELS } from "./models.js";
+import { firstText } from "./claude.js";
 import { tracked, BadResponseError } from "./health.js";
 
 // ---------------------------------------------------------------------------
@@ -229,15 +231,15 @@ function createClaudeProvider(): AIProvider {
   async function complete(prompt: string): Promise<string> {
     const res = await getClient().messages.create(
       {
-        model: "claude-sonnet-4-6",
+        model: MODELS.claude,
+        // Disabled deliberately — see models.ts.
+        thinking: { type: "disabled" },
         max_tokens: COUNCIL_MAX_TOKENS,
         messages: [{ role: "user", content: prompt }],
       },
       { signal: AbortSignal.timeout(AI_CALL_TIMEOUT_MS) },
     );
-    const block = res.content[0];
-    if (block.type !== "text") throw new Error("Unexpected response type");
-    return block.text;
+    return firstText(res.content);
   }
 
   return {
@@ -260,7 +262,7 @@ const providers: AIProvider[] = [
     "OpenAI",
     () => appConfig.OPENAI_API_KEY,
     "https://api.openai.com/v1",
-    "gpt-4o"
+    MODELS.openai
   ),
   createClaudeProvider(),
 
@@ -269,31 +271,31 @@ const providers: AIProvider[] = [
     "Gemini",
     () => appConfig.GEMINI_API_KEY,
     "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "gemini-2.0-flash"
+    MODELS.gemini
   ),
   createOAIProvider(
     "Groq",
     () => appConfig.GROQ_API_KEY,
     "https://api.groq.com/openai/v1",
-    "llama-3.3-70b-versatile"
+    MODELS.groq
   ),
   createOAIProvider(
     "Cohere",
     () => appConfig.COHERE_API_KEY,
     "https://api.cohere.com/compatibility/v1",
-    "command-r-plus"
+    MODELS.cohere
   ),
   createOAIProvider(
     "Mistral",
     () => appConfig.MISTRAL_API_KEY,
     "https://api.mistral.ai/v1",
-    "mistral-small-latest"
+    MODELS.mistral
   ),
   createOAIProvider(
     "DeepSeek",
     () => appConfig.DEEPSEEK_API_KEY,
     "https://api.deepseek.com",
-    "deepseek-chat"
+    MODELS.deepseek
   ),
 ];
 
