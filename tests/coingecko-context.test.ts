@@ -278,3 +278,19 @@ describe("adaptive pacing", () => {
     expect(getCoinGeckoGapMs()).toBeGreaterThanOrEqual(20); // never faster than the base
   });
 });
+
+describe("a Demo key changes what the limit even is", () => {
+  it("paces keyless requests slowly and keyed requests quickly", () => {
+    // Keyless: a few calls/min, so go slow. Keyed: 100/min, and the real limit
+    // becomes the 10k monthly cap, which call volume controls — not pacing.
+    _setCoinGeckoPacing({ gapMs: null, pauseMs: 0, maxWaitMs: 60_000 });
+    delete process.env.COINGECKO_API_KEY;
+    const keyless = getCoinGeckoGapMs();
+
+    process.env.COINGECKO_API_KEY = "CG-test";
+    const keyed = getCoinGeckoGapMs();
+
+    expect(keyless).toBeGreaterThan(keyed * 2);
+    expect(keyed).toBeGreaterThan(0);
+  });
+});

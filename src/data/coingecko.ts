@@ -177,14 +177,29 @@ function apiKey(): string | undefined {
 /**
  * Minimum gap between requests, adapted at runtime.
  *
- * CoinGecko's keyless limit is dynamic and undocumented: measured live, even
- * 10 requests/min drew a 429 on the 5th. So the gap starts here, grows by half
- * after every rate limit, and eases back while requests succeed.
+ * Keyless, CoinGecko's limit is dynamic and undocumented: measured live, even
+ * 7.5 requests/min drew a 429 on the 5th, so the base pace is deliberately
+ * slow. With a Demo key the per-minute limit is 100 and the binding constraint
+ * becomes the 10k monthly cap, which call volume (not pacing) controls — so
+ * keyed requests are paced far faster.
+ *
+ * Either way the gap grows by half after a rate limit and eases back on success.
  */
-const DEFAULT_GAP_MS = 8_000;
+const KEYLESS_GAP_MS = 8_000;
+const KEYED_GAP_MS = 1_200;
 const MAX_GAP_MS = 60_000;
-let baseGapMs = DEFAULT_GAP_MS;
-let minRequestGapMs = DEFAULT_GAP_MS;
+/** Set by tests; otherwise the base depends on whether a key is configured. */
+let baseGapOverride: number | null = null;
+/** Current adapted gap. Clamped to at least the base on every use. */
+let adaptiveGapMs = 0;
+
+function baseGapMs(): number {
+  return baseGapOverride ?? (apiKey() ? KEYED_GAP_MS : KEYLESS_GAP_MS);
+}
+
+function currentGapMs(): number {
+  return Math.min(MAX_GAP_MS, Math.max(baseGapMs(), adaptiveGapMs));
+}
 /** How long a 429 stops all CoinGecko traffic (their Retry-After is 60s). */
 let rateLimitPauseMs = 60_000;
 /** A queued request that has waited longer than this fails instead of piling up. */
@@ -192,15 +207,18 @@ let maxQueueWaitMs = 30_000;
 
 /** Current gap between requests, in ms. Grows while CoinGecko is rate-limiting us. */
 export function getCoinGeckoGapMs(): number {
-  return minRequestGapMs;
+  return currentGapMs();
 }
 
 /** Test hook for pacing constants; also clears queue state. */
-export function _setCoinGeckoPacing(opts: { gapMs?: number; pauseMs?: number; maxWaitMs?: number }): void {
-  if (opts.gapMs !== undefined) {
-    baseGapMs = opts.gapMs;
-    minRequestGapMs = opts.gapMs;
-  }
+export function _setCoinGeckoPacing(opts: {
+  /** null restores the key-dependent default. */
+  gapMs?: number | null;
+  pauseMs?: number;
+  maxWaitMs?: number;
+}): void {
+  if (opts.gapMs !== undefined) baseGapOverride = opts.gapMs;
+  adaptiveGapMs = 0;
   if (opts.pauseMs !== undefined) rateLimitPauseMs = opts.pauseMs;
   if (opts.maxWaitMs !== undefined) maxQueueWaitMs = opts.maxWaitMs;
   lastRequestAt = 0;
@@ -253,16 +271,17 @@ function schedule<T>(run: () => Promise<T>): Promise<T> {
     }
     // Clamped: a clock jump (or a system clock change) must not park the queue
     // for hours on a stale lastRequestAt.
+    const gap = currentGapMs();
     const wait = Math.min(
-      Math.max(pausedUntil - now, lastRequestAt + minRequestGapMs - now, 0),
-      Math.max(minRequestGapMs, rateLimitPauseMs)
+      Math.max(pausedUntil - now, lastRequestAt + gap - now, 0),
+      Math.max(gap, rateLimitPauseMs)
     );
     if (wait > 0) await delay(wait);
     lastRequestAt = Date.now();
     countCall();
     const result = await run();
     // It went through: ease back toward the base pace.
-    minRequestGapMs = Math.max(baseGapMs, Math.round(minRequestGapMs * 0.9));
+    adaptiveGapMs = Math.max(baseGapMs(), Math.round(currentGapMs() * 0.9));
     return result;
   });
   // Keep the chain alive regardless of outcome.
@@ -301,7 +320,7 @@ function cgFetch(path: string): Promise<unknown> {
         const pause = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : rateLimitPauseMs;
         pausedUntil = Date.now() + pause;
         // And go slower from here: their limit is lower than we assumed.
-        minRequestGapMs = Math.min(MAX_GAP_MS, Math.max(baseGapMs, Math.round(minRequestGapMs * 1.5)));
+        adaptiveGapMs = Math.min(MAX_GAP_MS, Math.round(currentGapMs() * 1.5));
 
         const message = key
           ? `CoinGecko rate limit hit — the per-minute limit, or the Demo plan's 10,000/month cap (${usage.calls} calls counted since startup); pausing ${Math.round(pause / 1000)}s`
