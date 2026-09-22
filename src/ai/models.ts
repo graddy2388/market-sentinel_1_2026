@@ -44,8 +44,17 @@ export const MODELS = {
    */
   deepseek: "deepseek-flash",
 
-  // No key configured and not checked — verify against the provider's current
-  // catalogue before adding one.
-  cohere: "command-r-plus",
-  mistral: "mistral-small-latest",
+  /**
+   * Checked 2026-09-22. `command-r-plus` still resolves, but to an April 2024
+   * model — two generations behind. Command A is the current workhorse.
+   * Price not verified; a Cohere trial key is free but rate-limited.
+   */
+  cohere: "command-a-03-2025",
+
+  /**
+   * Checked 2026-09-22: Mistral Small 4, $0.15/$0.60 per MTok. Pinned to the
+   * explicit version rather than `-latest` so the council's inputs don't
+   * change under us when Mistral ships a new Small.
+   */
+  mistral: "mistral-small-2603",
 } as const;
