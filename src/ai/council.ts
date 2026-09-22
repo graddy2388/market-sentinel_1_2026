@@ -13,6 +13,7 @@ import type {
   ModelError,
 } from "./types.js";
 import type { TechnicalSummary } from "../analysis/types.js";
+import { tracked, BadResponseError } from "./health.js";
 
 // ---------------------------------------------------------------------------
 // Provider interface
@@ -141,6 +142,31 @@ function sanitizeProviderError(err: unknown): string {
   return "request failed";
 }
 
+/**
+ * Get a parseable reply, asking once more if the first is garbled. The SDKs
+ * retry failed HTTP calls, but not a successful call that returned text we
+ * can't use — truncated or prose-wrapped JSON used to fail the model outright.
+ */
+export async function completeParsed<T>(
+  complete: () => Promise<string>,
+  schema: { parse: (v: unknown) => T }
+): Promise<T> {
+  const first = await complete();
+  try {
+    return parseJson(first, schema);
+  } catch {
+    // Fall through to one retry.
+  }
+  const second = await complete();
+  try {
+    return parseJson(second, schema);
+  } catch (err) {
+    throw new BadResponseError(
+      `Unparseable reply after retry: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI-compatible provider factory (reuses the installed `openai` package)
 // ---------------------------------------------------------------------------
@@ -178,12 +204,10 @@ function createOAIProvider(
   return {
     name,
     available: () => !!getApiKey(),
-    async analyze(prompt) {
-      return parseJson(await complete(prompt), analysisResponseSchema);
-    },
-    async critique(prompt) {
-      return parseJson(await complete(prompt), critiqueResponseSchema);
-    },
+    analyze: (prompt) =>
+      tracked(name, () => completeParsed(() => complete(prompt), analysisResponseSchema)),
+    critique: (prompt) =>
+      tracked(name, () => completeParsed(() => complete(prompt), critiqueResponseSchema)),
   };
 }
 
@@ -219,12 +243,10 @@ function createClaudeProvider(): AIProvider {
   return {
     name: "Claude",
     available: () => !!appConfig.ANTHROPIC_API_KEY,
-    async analyze(prompt) {
-      return parseJson(await complete(prompt), analysisResponseSchema);
-    },
-    async critique(prompt) {
-      return parseJson(await complete(prompt), critiqueResponseSchema);
-    },
+    analyze: (prompt) =>
+      tracked("Claude", () => completeParsed(() => complete(prompt), analysisResponseSchema)),
+    critique: (prompt) =>
+      tracked("Claude", () => completeParsed(() => complete(prompt), critiqueResponseSchema)),
   };
 }
 

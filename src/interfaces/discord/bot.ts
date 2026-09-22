@@ -7,11 +7,12 @@ import {
 } from "discord.js";
 import { appConfig } from "../../config.js";
 import { commands, handlePrice, handleAnalyze, handleAlerts, handleHelp } from "./commands.js";
-import { alertEmbed, signalEmbed } from "./embeds.js";
+import { alertEmbed, signalEmbed, providerAlertEmbed } from "./embeds.js";
 import { handleChatMessage, handleImageMessage, type ChatResponse } from "./chat.js";
 import { startBriefingScheduler, stopBriefingScheduler } from "./briefing.js";
 import type { TriggeredAlert } from "../../alerts/engine.js";
 import type { GradedSignal } from "../../signals/scorer.js";
+import type { ProviderAlert } from "../../ai/health.js";
 
 let client: Client | null = null;
 let alertChannelId: string | null = null;
@@ -182,6 +183,20 @@ export async function sendAlertNotification(alert: TriggeredAlert, currentPrice:
     }
   } catch (err) {
     console.error("[Discord] Failed to send alert notification:", err);
+  }
+}
+
+/** Tell the channel an AI provider broke, or recovered. Throttling lives in ai/health.ts. */
+export async function sendProviderAlert(alert: ProviderAlert): Promise<void> {
+  if (!client || !alertChannelId) return;
+
+  try {
+    const channel = await client.channels.fetch(alertChannelId);
+    if (channel && channel.isTextBased() && "send" in channel) {
+      await (channel as TextChannel).send({ embeds: [providerAlertEmbed(alert)] });
+    }
+  } catch (err) {
+    console.error("[Discord] Failed to send provider alert:", err);
   }
 }
 

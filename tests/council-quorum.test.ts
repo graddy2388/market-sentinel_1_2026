@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { settleWithQuorum, parseJson } from "../src/ai/council.js";
+import { vi } from "vitest";
+import { settleWithQuorum, parseJson, completeParsed } from "../src/ai/council.js";
+import { BadResponseError } from "../src/ai/health.js";
 
 function delayed<T>(value: T, ms: number): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms));
@@ -116,5 +118,42 @@ describe("parseJson", () => {
 
   it("throws when the JSON does not match the schema", () => {
     expect(() => parseJson('{"wrong":"shape"}', testSchema)).toThrow();
+  });
+});
+
+describe("completeParsed — one retry for a garbled reply", () => {
+  // The SDKs retry failed HTTP calls, but not a successful call that returned
+  // text we can't use. Truncated JSON used to fail the model outright.
+  const schema = z.object({ direction: z.string() });
+
+  it("asks once when the first reply parses", async () => {
+    const complete = vi.fn(async () => '{"direction":"bullish"}');
+    expect(await completeParsed(complete, schema)).toEqual({ direction: "bullish" });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries once after a truncated reply, and uses the second", async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce('{"direction":"bull')
+      .mockResolvedValueOnce('{"direction":"bearish"}');
+
+    expect(await completeParsed(complete, schema)).toEqual({ direction: "bearish" });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after the retry with a BadResponseError — never a third call", async () => {
+    const complete = vi.fn(async () => "I think it's going up!");
+
+    await expect(completeParsed(complete, schema)).rejects.toBeInstanceOf(BadResponseError);
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("doesn't retry an HTTP failure itself — the SDK already did", async () => {
+    const complete = vi.fn(async () => {
+      throw new Error("401 invalid key");
+    });
+
+    await expect(completeParsed(complete, schema)).rejects.toThrow("401");
+    expect(complete).toHaveBeenCalledTimes(1);
   });
 });

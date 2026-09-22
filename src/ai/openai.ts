@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { appConfig } from "../config.js";
 import { analysisResponseSchema, critiqueResponseSchema } from "./types.js";
+import { tracked } from "./health.js";
 import type { AnalysisResponse, CritiqueResponse } from "./types.js";
 
 let client: OpenAI | null = null;
@@ -15,10 +16,18 @@ function getClient(): OpenAI {
   return client;
 }
 
+/** Every OpenAI call goes through here so provider health sees it. */
+function createCompletion(
+  body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming,
+  options?: { signal?: AbortSignal }
+): Promise<OpenAI.Chat.ChatCompletion> {
+  return tracked("OpenAI", () => getClient().chat.completions.create(body, options));
+}
+
 const AI_CALL_TIMEOUT_MS = 30_000;
 
 async function chatCompletion(prompt: string): Promise<string> {
-  const response = await getClient().chat.completions.create(
+  const response = await createCompletion(
     {
       model: "gpt-4o",
       messages: [{ role: "user", content: prompt }],
@@ -51,7 +60,7 @@ export async function chatWithOpenAI(
   maxTokens = 1000,
   history: Array<{ role: "user" | "assistant"; content: string }> = []
 ): Promise<string> {
-  const response = await getClient().chat.completions.create(
+  const response = await createCompletion(
     {
       model: "gpt-4o",
       messages: [
@@ -84,7 +93,7 @@ export async function chatWithOpenAIVision(
     throw new Error("Invalid image URL");
   }
 
-  const response = await getClient().chat.completions.create(
+  const response = await createCompletion(
     {
       model: "gpt-4o",
       messages: [
@@ -114,7 +123,7 @@ export async function openaiToolTurn(
   tools: OpenAI.Chat.ChatCompletionTool[],
   maxTokens = 1200
 ): Promise<OpenAI.Chat.ChatCompletionMessage> {
-  const response = await getClient().chat.completions.create(
+  const response = await createCompletion(
     {
       model: "gpt-4o",
       messages,

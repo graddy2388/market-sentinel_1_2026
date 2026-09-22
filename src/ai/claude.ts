@@ -3,6 +3,7 @@ import { appConfig } from "../config.js";
 import { analysisResponseSchema, critiqueResponseSchema } from "./types.js";
 import { safeFetchImage } from "./safe-fetch.js";
 import type { AnalysisResponse, CritiqueResponse } from "./types.js";
+import { tracked } from "./health.js";
 
 let client: Anthropic | null = null;
 
@@ -18,8 +19,16 @@ function getClient(): Anthropic {
 
 const AI_CALL_TIMEOUT_MS = 30_000;
 
+/** Every Claude call goes through here so provider health sees it. */
+function createMessage(
+  body: Anthropic.MessageCreateParamsNonStreaming,
+  options?: { signal?: AbortSignal }
+): Promise<Anthropic.Message> {
+  return tracked("Claude", () => getClient().messages.create(body, options));
+}
+
 async function chatCompletion(prompt: string): Promise<string> {
-  const response = await getClient().messages.create(
+  const response = await createMessage(
     {
       model: "claude-sonnet-4-6",
       max_tokens: 1000,
@@ -53,7 +62,7 @@ export async function chatWithClaude(
   maxTokens = 1000,
   history: Array<{ role: "user" | "assistant"; content: string }> = []
 ): Promise<string> {
-  const response = await getClient().messages.create(
+  const response = await createMessage(
     {
       model: "claude-sonnet-4-6",
       max_tokens: maxTokens,
@@ -76,7 +85,7 @@ export async function chatWithClaudeVision(
   const { buffer, mediaType } = await safeFetchImage(imageUrl);
   const base64 = buffer.toString("base64");
 
-  const response = await getClient().messages.create(
+  const response = await createMessage(
     {
       model: "claude-sonnet-4-6",
       max_tokens: 1500,
@@ -111,7 +120,7 @@ export async function claudeToolTurn(
   tools: Anthropic.Tool[],
   maxTokens = 1200
 ): Promise<Anthropic.Message> {
-  return getClient().messages.create(
+  return createMessage(
     {
       model: "claude-sonnet-4-6",
       max_tokens: maxTokens,

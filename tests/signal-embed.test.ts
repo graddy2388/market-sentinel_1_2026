@@ -14,7 +14,7 @@ vi.mock("../src/data/providers.js", () => ({
 }));
 vi.mock("../src/data/finnhub.js", () => ({ isFinnhubAvailable: () => false }));
 
-const { signalEmbed } = await import("../src/interfaces/discord/embeds.js");
+const { signalEmbed, providerAlertEmbed } = await import("../src/interfaces/discord/embeds.js");
 
 function signal(overrides: Partial<GradedSignal> = {}): GradedSignal {
   return {
@@ -61,5 +61,39 @@ describe("signalEmbed", () => {
     expect(f.Stop).toBeUndefined();
     expect(f.Target).toBeUndefined();
     expect(f.Levels).toContain("no trade");
+  });
+});
+
+describe("providerAlertEmbed", () => {
+  const failing = {
+    provider: "OpenAI", status: "failing" as const, kind: "auth" as const,
+    label: "API key rejected",
+    advice: "The API key was rejected. Rotate OPENAI_API_KEY in the Portainer stack and repull.",
+    consecutiveFailures: 1, failingSince: Date.UTC(2026, 8, 22, 12), timestamp: Date.UTC(2026, 8, 22, 12),
+  };
+  const embedFields = (a: Parameters<typeof providerAlertEmbed>[0]) =>
+    Object.fromEntries((providerAlertEmbed(a).toJSON().fields ?? []).map((f) => [f.name, f.value]));
+
+  it("says what broke and exactly what to do", () => {
+    const json = providerAlertEmbed({ ...failing, healthyOthers: ["Claude"] }).toJSON();
+    expect(json.title).toBe("⚠️ OpenAI — API key rejected");
+    expect(embedFields({ ...failing, healthyOthers: ["Claude"] })["What to do"]).toContain("OPENAI_API_KEY");
+  });
+
+  it("names what still works", () => {
+    expect(embedFields({ ...failing, healthyOthers: ["Claude", "Gemini"] }).Meanwhile).toContain("Claude, Gemini");
+  });
+
+  it("says plainly when nothing else is working", () => {
+    expect(embedFields({ ...failing, healthyOthers: [] }).Meanwhile).toContain("down until one recovers");
+  });
+
+  it("marks reminders", () => {
+    expect(providerAlertEmbed({ ...failing, reminder: true }).toJSON().title).toContain("Still failing");
+  });
+
+  it("announces recovery", () => {
+    const json = providerAlertEmbed({ provider: "OpenAI", status: "recovered", failingSince: failing.failingSince, timestamp: Date.now() }).toJSON();
+    expect(json.title).toBe("✅ OpenAI is working again");
   });
 });

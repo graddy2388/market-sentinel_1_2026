@@ -6,6 +6,7 @@ import type { MarketOverview } from "../../data/types.js";
 import type { TechnicalSummary, SignalDirection } from "../../analysis/types.js";
 import type { TriggeredAlert } from "../../alerts/engine.js";
 import type { GradedSignal, SignalCall } from "../../signals/scorer.js";
+import type { ProviderAlert } from "../../ai/health.js";
 
 const COLOR_GREEN = 0x2ecc71;
 const COLOR_RED = 0xe74c3c;
@@ -235,6 +236,47 @@ function signalCallEmoji(call: SignalCall): string {
     case "STRONG_SELL": return "🔴🔴";
     default: return "⚪";
   }
+}
+
+/**
+ * An AI provider broke or recovered. Written for the operator: what's wrong,
+ * what (if anything) to do, and that the rest of the system keeps running.
+ */
+export function providerAlertEmbed(alert: ProviderAlert): EmbedBuilder {
+  // Discord renders <t:unix:R> as a live relative time ("12 minutes ago").
+  const since = alert.failingSince ? `<t:${Math.floor(alert.failingSince / 1000)}:R>` : null;
+
+  if (alert.status === "recovered") {
+    return new EmbedBuilder()
+      .setTitle(`✅ ${alert.provider} is working again`)
+      .setColor(COLOR_GREEN)
+      .setDescription(since ? `It had been failing since ${since}.` : "Calls are succeeding again.")
+      .setFooter({ text: "Market Sentinel health monitor" })
+      .setTimestamp(alert.timestamp);
+  }
+
+  const fields = [
+    { name: "What to do", value: alert.advice ?? "Check the container logs.", inline: false },
+    {
+      name: "Meanwhile",
+      value:
+        alert.healthyOthers && alert.healthyOthers.length > 0
+          ? `Retries are automatic. Still working: ${alert.healthyOthers.join(", ")}.`
+          : "No other AI provider is currently working — chat and AI analysis are down until one recovers.",
+      inline: false,
+    },
+  ];
+  if (since) fields.push({ name: "Failing since", value: since, inline: true });
+  if (alert.consecutiveFailures) {
+    fields.push({ name: "Failed calls in a row", value: String(alert.consecutiveFailures), inline: true });
+  }
+
+  return new EmbedBuilder()
+    .setTitle(`⚠️ ${alert.reminder ? "Still failing: " : ""}${alert.provider} — ${alert.label ?? "failing"}`)
+    .setColor(COLOR_RED)
+    .addFields(fields)
+    .setFooter({ text: "Market Sentinel health monitor" })
+    .setTimestamp(alert.timestamp);
 }
 
 export function signalEmbed(signal: GradedSignal): EmbedBuilder {

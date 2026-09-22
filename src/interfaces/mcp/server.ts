@@ -11,6 +11,7 @@ import { startPoller, stopPoller } from "../../data/poller.js";
 import { DataManager } from "../../data/manager.js";
 import { startSignalMonitor, stopSignalMonitor } from "../../signals/monitor.js";
 import { bus } from "../../events/bus.js";
+import { onProviderAlert } from "../../ai/health.js";
 import { handleDashboardRequest } from "../web/dashboard.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
@@ -591,9 +592,8 @@ async function startHttp() {
     // Start Discord bot + alert engine if configured
     if (hasDiscord()) {
       try {
-        const { startDiscordBot, sendAlertNotification, sendSignalNotification } = await import(
-          "../discord/bot.js"
-        );
+        const { startDiscordBot, sendAlertNotification, sendSignalNotification, sendProviderAlert } =
+          await import("../discord/bot.js");
         const { startAlertEngine } = await import("../../alerts/engine.js");
 
         await startDiscordBot();
@@ -606,6 +606,12 @@ async function startHttp() {
         bus.onSignal((signal) => {
           sendSignalNotification(signal).catch((err) =>
             console.error("[Market Sentinel] Signal notification error:", err)
+          );
+        });
+        // Tell the operator when an AI provider breaks or recovers.
+        onProviderAlert((alert) => {
+          sendProviderAlert(alert).catch((err) =>
+            console.error("[Market Sentinel] Provider alert error:", err)
           );
         });
         console.log("[Market Sentinel] Discord bot and alert engine started");
