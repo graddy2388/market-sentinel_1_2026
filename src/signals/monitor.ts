@@ -36,6 +36,7 @@ import { getLatestSignal, insertSignal, hasSignalChanged } from "./store.js";
 import { isWatched, listWatchlist } from "../state/watchlist.js";
 import { bus } from "../events/bus.js";
 import type { CouncilAnalysisResult } from "../ai/types.js";
+import type { TechnicalSummary } from "../analysis/types.js";
 import type { GradedSignal } from "./scorer.js";
 
 /** Refresh the AI council at most this often per symbol. */
@@ -79,12 +80,49 @@ async function getHourlyCandles(symbol: string) {
   return fetchCandlesCached(symbol, "1h", 250);
 }
 
+/** A fresh Sentinel read: the graded signal plus what it was built from. */
+export interface SentinelAssessment {
+  signal: GradedSignal;
+  technical: TechnicalSummary;
+  council?: CouncilAnalysisResult;
+}
+
+/**
+ * Score a symbol right now, without persisting or posting anything. Shares
+ * the council cache with the sweep, so an on-demand read right after a sweep
+ * costs no extra AI calls. Returns null when there isn't enough candle data.
+ */
+export async function assessSymbol(symbol: string): Promise<SentinelAssessment | null> {
+  const sym = symbol.toUpperCase();
+
+  const candles = await getHourlyCandles(sym);
+  if (candles.length < MIN_CANDLES) return null;
+
+  const technical = analyzeTechnicals(sym, candles);
+  if (!technical) return null;
+
+  // Council gating: reuse a fresh cached council; otherwise refresh (lazily).
+  let council: CouncilAnalysisResult | undefined;
+  if (hasAnyAI()) {
+    const cachedCouncil = lastCouncilBySymbol.get(sym);
+    if (cachedCouncil && isCouncilFresh(cachedCouncil.at)) {
+      council = cachedCouncil.result;
+    } else {
+      const fresh = await councilAnalyze(sym, technical);
+      lastCouncilBySymbol.set(sym, { result: fresh, at: Date.now() });
+      council = fresh;
+    }
+  }
+
+  return { signal: scoreSignal(technical, council), technical, council };
+}
+
 /**
  * Re-score a single symbol and, if the signal meaningfully changed, persist it
  * and emit it on the bus. Returns the new signal when a push occurred, else null.
  *
- * Guarded by a per-symbol in-flight lock so two rapid candle events for the same
- * symbol can't launch duplicate council calls.
+ * Guarded by a per-symbol in-flight lock so overlapping evaluations of the
+ * same symbol can't launch duplicate council calls.
  */
 export async function evaluateSymbol(symbol: string): Promise<GradedSignal | null> {
   const sym = symbol.toUpperCase();
@@ -92,31 +130,13 @@ export async function evaluateSymbol(symbol: string): Promise<GradedSignal | nul
   inFlight.add(sym);
 
   try {
-    // The stream's symbol list is fixed at startup, so removing a coin from the
-    // watchlist used to change nothing until a restart. Checking here makes
-    // removal take effect on the next candle — and skips the council spend.
+    // Checked before any work, so removing a coin from the watchlist takes
+    // effect on the next sweep — and skips the council spend.
     if (!(await isWatched(sym))) return null;
 
-    const candles = await getHourlyCandles(sym);
-    if (candles.length < MIN_CANDLES) return null;
-
-    const technical = analyzeTechnicals(sym, candles);
-    if (!technical) return null;
-
-    // Council gating: reuse a fresh cached council; otherwise refresh (lazily).
-    let council: CouncilAnalysisResult | undefined;
-    if (hasAnyAI()) {
-      const cachedCouncil = lastCouncilBySymbol.get(sym);
-      if (cachedCouncil && isCouncilFresh(cachedCouncil.at)) {
-        council = cachedCouncil.result;
-      } else {
-        const fresh = await councilAnalyze(sym, technical);
-        lastCouncilBySymbol.set(sym, { result: fresh, at: Date.now() });
-        council = fresh;
-      }
-    }
-
-    const signal = scoreSignal(technical, council);
+    const assessment = await assessSymbol(sym);
+    if (!assessment) return null;
+    const { signal } = assessment;
 
     const previous = await getLatestSignal(sym);
     if (!hasSignalChanged(previous, signal)) return null;

@@ -25,6 +25,9 @@ import {
   listWatchlist,
 } from "../../state/watchlist.js";
 import { researchSymbol, describeSource } from "../../agents/research/agent.js";
+import { proposeTrade } from "../../agents/orchestrator.js";
+import { listDecisionRecords } from "../../state/proposals.js";
+import type { DecisionRecord, ProposalStatus } from "../../agents/types.js";
 import { symbolSchema, thresholdSchema } from "../../validation.js";
 import { hasAnyAI } from "../../config.js";
 
@@ -337,9 +340,103 @@ async function researchAsset(input: Record<string, unknown>): Promise<ToolResult
 
 type ToolHandler = (input: Record<string, unknown>) => Promise<ToolResult>;
 
+// ---------------------------------------------------------------------------
+// Multi-agent trade review (Phase B: decisions are logged, never executed)
+// ---------------------------------------------------------------------------
+
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/** The parts of a decision record the model needs to explain it. */
+function compactRecord(r: DecisionRecord) {
+  return {
+    id: r.id ?? null,
+    symbol: r.symbol,
+    status: r.status,
+    action: r.action,
+    proposedCall: r.proposedCall,
+    summary: r.summary,
+    confidence: r.confidence,
+    preDialogueConfidence: r.preDialogueConfidence,
+    vetoReason: r.vetoReason,
+    votes: r.votes.map((v) => ({
+      agent: v.agent,
+      evaluated: v.evaluated,
+      direction: v.direction,
+      confidence: v.confidence,
+      isDissent: v.isDissent,
+      veto: v.veto,
+      rationale: clip(v.rationale, 400),
+    })),
+    dialogue: {
+      ran: r.dialogue.ran,
+      skippedReason: r.dialogue.skippedReason,
+      turns: r.dialogue.turns.map((t) => ({
+        round: t.round,
+        agent: t.agent,
+        message: t.message,
+        confidenceBefore: t.confidenceBefore,
+        confidenceAfter: t.confidenceAfter,
+        clampNote: t.clampNote,
+      })),
+    },
+    levels: r.sentinel ? { entry: r.sentinel.entry, stop: r.sentinel.stop, target: r.sentinel.target } : null,
+    errors: r.errors,
+    note: "Shadow mode: decisions are logged only. No order is ever placed.",
+  };
+}
+
+async function evaluateTrade(input: Record<string, unknown>): Promise<ToolResult> {
+  const sym = parseSymbol(input.symbol);
+  if ("error" in sym) return fail(sym.error);
+  if (!hasAnyAI()) return fail("No AI models configured for the trade review.");
+
+  const record = await proposeTrade(sym.symbol, "chat");
+  return { text: JSON.stringify(compactRecord(record)), artifacts: { symbol: record.symbol } };
+}
+
+const PROPOSAL_STATUSES: ReadonlySet<string> = new Set([
+  "eligible",
+  "below_threshold",
+  "vetoed",
+  "no_action",
+  "error",
+]);
+
+async function listProposals(input: Record<string, unknown>): Promise<ToolResult> {
+  let symbol: string | undefined;
+  if (input.symbol != null && input.symbol !== "") {
+    const sym = parseSymbol(input.symbol);
+    if ("error" in sym) return fail(sym.error);
+    symbol = sym.symbol;
+  }
+  const status = typeof input.status === "string" && PROPOSAL_STATUSES.has(input.status)
+    ? (input.status as ProposalStatus)
+    : undefined;
+  const requested = Number(input.limit);
+  const limit = Number.isFinite(requested) ? Math.min(Math.max(Math.floor(requested), 1), 20) : 5;
+
+  const records = await listDecisionRecords({ symbol, status, limit });
+  return {
+    text: JSON.stringify({
+      count: records.length,
+      proposals: records.map((r) => ({
+        id: r.id ?? null,
+        symbol: r.symbol,
+        status: r.status,
+        trigger: r.trigger,
+        confidence: r.confidence?.confidence ?? null,
+        summary: r.summary,
+        at: new Date(r.createdAt).toISOString(),
+      })),
+    }),
+  };
+}
+
 const HANDLERS: Record<string, ToolHandler> = {
   get_market_data: getMarketData,
   research_asset: researchAsset,
+  evaluate_trade: evaluateTrade,
+  list_proposals: listProposals,
   run_analysis: runAnalysis,
   manage_watchlist: manageWatchlist,
   manage_alerts: manageAlerts,

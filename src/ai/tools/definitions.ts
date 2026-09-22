@@ -68,9 +68,38 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
   },
   {
+    name: "evaluate_trade",
+    description:
+      "Run the full multi-agent trade review on a symbol: Sentinel (technicals + AI council) and the Research Agent assess it independently, debate for up to two rounds, vote, and a confidence gate decides whether it would go to the user for approval. Returns the decision record, including any dissent. It NEVER places an order — it only logs a decision. Slow (up to a minute) and costly: use only when the user asks whether the system would trade something, wants a trade proposal, or asks what the agents think together. At most one call per message.",
+    parameters: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Ticker symbol, e.g. BTC, XRP, VVV." },
+      },
+      required: ["symbol"],
+    },
+  },
+  {
+    name: "list_proposals",
+    description:
+      "List recent decision records from the multi-agent trade review — what it found eligible, rejected, or vetoed, and why. Use when the user asks what the system has proposed, what it almost traded, or why something was rejected. Read-only.",
+    parameters: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Only this symbol. Optional." },
+        status: {
+          type: "string",
+          enum: ["eligible", "below_threshold", "vetoed", "no_action", "error"],
+          description: "Only this outcome. Optional.",
+        },
+        limit: { type: "number", description: "How many, newest first (default 5, max 20)." },
+      },
+    },
+  },
+  {
     name: "manage_watchlist",
     description:
-      "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and the automated signal posts (the 'X — BUY/SELL/HOLD' embeds), so 'add X to my daily briefing' means add, and 'stop the X alerts/signals' means remove. Removal takes effect on the next candle. Adding is idempotent.",
+      "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and the automated signal posts (the 'X — BUY/SELL/HOLD' embeds), so 'add X to my daily briefing' means add, and 'stop the X alerts/signals' means remove. Changes take effect on the next signal sweep, within about 5 minutes. Adding is idempotent.",
     parameters: {
       type: "object",
       properties: {

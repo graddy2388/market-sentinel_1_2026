@@ -48,6 +48,11 @@ vi.mock("../src/ai/council.js", () => ({
     avgConfidence: 0, disagreements: [], consensus: null,
   })),
 }));
+// The pipeline itself is covered in orchestrator.test.ts; here only the tool wiring.
+const proposeTradeMock = vi.hoisted(() => vi.fn());
+vi.mock("../src/agents/orchestrator.js", () => ({
+  proposeTrade: (...a: unknown[]) => proposeTradeMock(...a),
+}));
 vi.mock("../src/charts/renderer.js", () => ({
   renderChart: vi.fn(async () => Buffer.from("png")),
 }));
@@ -208,5 +213,65 @@ describe("executeTool dispatch", () => {
     const result = await executor.executeTool("delete_everything", {});
     expect(result.text).toContain("ERROR");
     expect(result.text).toContain("Unknown tool");
+  });
+});
+
+describe("evaluate_trade", () => {
+  const record = {
+    id: 7, symbol: "XRP", trigger: "chat", status: "below_threshold", action: "BUY", proposedCall: "BUY",
+    sentinel: { entry: 1.58, stop: 1.53, target: 1.66 }, research: null,
+    dialogue: { ran: false, skippedReason: "Already below the gate", turns: [] },
+    votes: [
+      { agent: "research", direction: "bearish", confidence: 0.8, isDissent: true, veto: null, evaluated: true,
+        rationale: "x".repeat(1000) },
+    ],
+    preDialogueConfidence: 0.4, confidence: { confidence: 0.4, threshold: 0.65 },
+    vetoReason: null, errors: [], summary: "BUY XRP — rejected at 40% (gate 65%).", createdAt: Date.now(),
+  };
+
+  it("runs the pipeline from chat and returns a compact record", async () => {
+    proposeTradeMock.mockResolvedValue(record);
+
+    const result = await executor.executeTool("evaluate_trade", { symbol: "xrp" });
+    const body = JSON.parse(result.text);
+
+    expect(proposeTradeMock).toHaveBeenCalledWith("XRP", "chat");
+    expect(body.status).toBe("below_threshold");
+    expect(body.votes[0].isDissent).toBe(true);
+    expect(body.votes[0].rationale.length).toBeLessThanOrEqual(400); // clipped for the model
+    expect(body.note).toContain("No order is ever placed");
+  });
+
+  it("validates the symbol before running anything", async () => {
+    proposeTradeMock.mockClear();
+    const result = await executor.executeTool("evaluate_trade", { symbol: "DROP TABLE" });
+    expect(result.text).toContain("ERROR");
+    expect(proposeTradeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("list_proposals", () => {
+  it("lists saved decision records, newest first, with filters", async () => {
+    const { saveDecisionRecord } = await import("../src/state/proposals.js");
+    const base = {
+      trigger: "signal" as const, action: null, proposedCall: null, sentinel: null, research: null,
+      dialogue: { ran: false, skippedReason: null, turns: [] }, votes: [], preDialogueConfidence: null,
+      confidence: null, vetoReason: null, errors: [],
+    };
+    await saveDecisionRecord({ ...base, symbol: "ADA", status: "no_action", summary: "ADA — HOLD", createdAt: Date.now() - 1000 });
+    await saveDecisionRecord({ ...base, symbol: "ADA", status: "error", summary: "ADA — failed", createdAt: Date.now() });
+
+    const all = JSON.parse((await executor.executeTool("list_proposals", { symbol: "ADA" })).text);
+    expect(all.proposals.map((p: { summary: string }) => p.summary)).toEqual(["ADA — failed", "ADA — HOLD"]);
+
+    const errors = JSON.parse((await executor.executeTool("list_proposals", { symbol: "ADA", status: "error" })).text);
+    expect(errors.count).toBe(1);
+  });
+
+  it("ignores an unknown status and clamps the limit instead of trusting the model", async () => {
+    const result = JSON.parse(
+      (await executor.executeTool("list_proposals", { status: "approved_by_ceo", limit: 9999 })).text
+    );
+    expect(result.count).toBeLessThanOrEqual(20);
   });
 });

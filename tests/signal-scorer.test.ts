@@ -150,17 +150,26 @@ describe("scoreSignal", () => {
     const tech = makeTechnical("bullish", 0.8);
     const failed = makeFailedCouncil();
     const signal = scoreSignal(tech, failed);
-    // Should be technical-only: net = 0.8 → STRONG_BUY, NOT diluted toward neutral
-    expect(signal.call).toBe("STRONG_BUY");
+    // Technical-only: conviction 0.8 is NOT diluted toward neutral, but with
+    // no council to confirm, the call is capped below STRONG.
+    expect(signal.conviction).toBeCloseTo(0.8, 5);
+    expect(signal.call).toBe("BUY");
     expect(signal.components.ai).toBeUndefined();
     expect(signal.rationale).toContain("technical-only");
+    expect(signal.rationale).toContain("no AI council to confirm");
   });
 
-  it("technical-only bullish (no council arg) is not diluted", () => {
+  it("technical-only bullish (no council arg) is not diluted, but is capped below STRONG", () => {
     const tech = makeTechnical("bullish", 0.8);
     const signal = scoreSignal(tech);
-    expect(signal.call).toBe("STRONG_BUY");
+    expect(signal.call).toBe("BUY");
     expect(signal.conviction).toBeCloseTo(0.8, 5);
+  });
+
+  it("the monitor's all-AI-down case no longer posts STRONG BUY @ 100%", () => {
+    const signal = scoreSignal(makeTechnical("bullish", 1), makeFailedCouncil());
+    expect(signal.call).toBe("BUY");
+    expect(signal.conviction).toBe(1);
   });
 
   it("uses ATR for stop/target on a long signal", () => {
@@ -202,7 +211,8 @@ describe("scoreSignal", () => {
     // short: stop above (100 + 1.5*2 = 103), target below (100 - 3*2 = 94)
     expect(signal.stop).toBeCloseTo(103, 5);
     expect(signal.target).toBeCloseTo(94, 5);
-    expect(signal.call).toBe("STRONG_SELL");
+    // Technical-only, so capped below STRONG.
+    expect(signal.call).toBe("SELL");
   });
 
   it("conviction is capped at 1", () => {

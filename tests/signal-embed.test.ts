@@ -14,7 +14,7 @@ vi.mock("../src/data/providers.js", () => ({
 }));
 vi.mock("../src/data/finnhub.js", () => ({ isFinnhubAvailable: () => false }));
 
-const { signalEmbed, providerAlertEmbed } = await import("../src/interfaces/discord/embeds.js");
+const { signalEmbed, providerAlertEmbed, shadowProposalEmbed } = await import("../src/interfaces/discord/embeds.js");
 
 function signal(overrides: Partial<GradedSignal> = {}): GradedSignal {
   return {
@@ -95,5 +95,69 @@ describe("providerAlertEmbed", () => {
   it("announces recovery", () => {
     const json = providerAlertEmbed({ provider: "OpenAI", status: "recovered", failingSince: failing.failingSince, timestamp: Date.now() }).toJSON();
     expect(json.title).toBe("✅ OpenAI is working again");
+  });
+});
+
+describe("shadowProposalEmbed", () => {
+  const vote = (agent: string, direction: string | null, confidence: number | null, extra = {}) => ({
+    agent, direction, confidence, rationale: `${agent} rationale`, isDissent: false, veto: null, evaluated: true, ...extra,
+  });
+  const record = (votes: unknown[]) => ({
+    id: 42, symbol: "XRP", trigger: "signal", status: "eligible", action: "BUY", proposedCall: "STRONG_BUY",
+    sentinel: { entry: 1.5781, stop: 1.53, target: 1.6504 }, research: null,
+    dialogue: { ran: true, skippedReason: null, turns: [{}, {}, {}, {}] },
+    votes, preDialogueConfidence: 0.78,
+    confidence: { confidence: 0.72, threshold: 0.65, sentinelConviction: 0.8, researchSupport: 0.64,
+      agreementFactor: 1, freshnessFactor: 1, base: 0.72, researchStance: "aligned" },
+    vetoReason: null, errors: [], summary: "", createdAt: Date.now(),
+  }) as never;
+  const fieldsOf = (r: never) =>
+    Object.fromEntries((shadowProposalEmbed(r).toJSON().fields ?? []).map((f) => [f.name, f.value]));
+
+  const unanimous = [
+    vote("sentinel", "bullish", 0.8),
+    vote("research", "bullish", 0.64),
+    vote("execution", null, null, { evaluated: false }),
+  ];
+
+  it("is unmistakably shadow mode", () => {
+    const json = shadowProposalEmbed(record(unanimous)).toJSON();
+    expect(json.title).toBe("🧪 Shadow proposal: STRONG BUY XRP");
+    expect(json.description).toContain("no order is placed");
+    expect(json.footer?.text).toContain("#42");
+  });
+
+  it("says 'Unanimous' outright — never an empty or missing dissent field", () => {
+    expect(fieldsOf(record(unanimous)).Dissent).toContain("Unanimous");
+  });
+
+  it("shows the dissenting agent's reasoning verbatim when there is dissent", () => {
+    const split = [
+      vote("sentinel", "bullish", 0.8),
+      vote("research", "neutral", 0.6, { isDissent: true, rationale: "Token unlock of 5% supply on Friday." }),
+      vote("execution", null, null, { evaluated: false }),
+    ];
+    const f = fieldsOf(record(split));
+    expect(f.Dissent).toContain("Token unlock of 5% supply on Friday.");
+    expect(f.Votes).toContain("⚠️ dissent");
+  });
+
+  it("shows the confidence math and the dialogue's effect", () => {
+    const f = fieldsOf(record(unanimous));
+    expect(f.Confidence).toContain("72%");
+    expect(f.Confidence).toContain("gate 65%");
+    expect(f.Dialogue).toContain("78% → 72%");
+    expect(f.Votes).toContain("Execution** — not evaluated yet");
+  });
+
+  it("stays within Discord's 1024-char field limit even with long dissent", () => {
+    const long = [
+      vote("sentinel", "bullish", 0.8, { isDissent: true, rationale: "s".repeat(3000) }),
+      vote("research", "bearish", 0.6, { isDissent: true, rationale: "r".repeat(3000) }),
+      vote("execution", null, null, { evaluated: false }),
+    ];
+    for (const value of Object.values(fieldsOf(record(long)))) {
+      expect((value as string).length).toBeLessThanOrEqual(1024);
+    }
   });
 });

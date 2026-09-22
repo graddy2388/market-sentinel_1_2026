@@ -217,7 +217,13 @@ export function scoreSignal(
     net = techNet;
   }
 
-  const call = gradeCall(net);
+  // STRONG means two independent reads agree. With a council present that's
+  // already implied (net >= 0.7 needs both leaning the same way); this bites
+  // when the council is absent because every AI provider failed, which used to
+  // post "STRONG BUY @ 100%" from indicators alone. Conviction is left undiluted.
+  const graded = gradeCall(net);
+  const strongCapped = !agreement && (graded === "STRONG_BUY" || graded === "STRONG_SELL");
+  const call: SignalCall = strongCapped ? (graded === "STRONG_BUY" ? "BUY" : "SELL") : graded;
   const conviction = Math.min(Math.abs(net), 1);
   const isLong = net > 0;
 
@@ -244,6 +250,9 @@ export function scoreSignal(
     parts.push("AI council unavailable — technical-only");
   }
   let rationale = `${callLabel(call)} @ ${(conviction * 100).toFixed(0)}% conviction. ${parts.join(" ")}.`;
+  if (strongCapped) {
+    rationale += ` Capped below STRONG: ${councilIsPresent(council) ? "technicals and AI council disagree" : "no AI council to confirm"}.`;
+  }
   // Levels are meaningless for HOLD, so their caveats would be too.
   if (call !== "HOLD" && levelNotes.length > 0) {
     rationale += ` Note: ${levelNotes.join("; ")}.`;

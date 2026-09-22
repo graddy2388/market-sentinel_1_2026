@@ -81,3 +81,56 @@ export const signalHistory = sqliteTable("signal_history", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// ---------------------------------------------------------------------------
+// Multi-agent decision records (Phase B: logged, never executed)
+//
+// One trade_proposals row per orchestrator run, with every agent's vote and
+// the dialogue turns alongside. `payload` holds the full DecisionRecord JSON;
+// the other columns exist so the dashboard can filter and sort without parsing.
+// ---------------------------------------------------------------------------
+
+export const tradeProposals = sqliteTable("trade_proposals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  symbol: text("symbol").notNull(),
+  /** BUY or SELL; null when there was nothing actionable to propose. */
+  action: text("action", { enum: ["BUY", "SELL"] }),
+  proposedCall: text("proposed_call"),
+  status: text("status", {
+    enum: ["no_action", "vetoed", "below_threshold", "eligible", "error"],
+  }).notNull(),
+  confidence: real("confidence"),
+  preDialogueConfidence: real("pre_dialogue_confidence"),
+  threshold: real("threshold").notNull(),
+  entry: real("entry"),
+  stop: real("stop"),
+  target: real("target"),
+  trigger: text("trigger").notNull(),
+  vetoReason: text("veto_reason"),
+  summary: text("summary").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+export const agentVotes = sqliteTable("agent_votes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  proposalId: integer("proposal_id").notNull(),
+  agent: text("agent", { enum: ["sentinel", "research", "execution"] }).notNull(),
+  direction: text("direction"),
+  confidence: real("confidence"),
+  rationale: text("rationale").notNull(),
+  isDissent: integer("is_dissent", { mode: "boolean" }).notNull(),
+  veto: text("veto"),
+});
+
+export const dialogueTranscripts = sqliteTable("dialogue_transcripts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  proposalId: integer("proposal_id").notNull(),
+  round: integer("round").notNull(),
+  agent: text("agent", { enum: ["sentinel", "research"] }).notNull(),
+  message: text("message").notNull(),
+  confidenceBefore: real("confidence_before"),
+  confidenceAfter: real("confidence_after"),
+});

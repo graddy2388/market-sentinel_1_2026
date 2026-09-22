@@ -7,6 +7,7 @@ import type { TechnicalSummary, SignalDirection } from "../../analysis/types.js"
 import type { TriggeredAlert } from "../../alerts/engine.js";
 import type { GradedSignal, SignalCall } from "../../signals/scorer.js";
 import type { ProviderAlert } from "../../ai/health.js";
+import type { DecisionRecord } from "../../agents/types.js";
 
 const COLOR_GREEN = 0x2ecc71;
 const COLOR_RED = 0xe74c3c;
@@ -277,6 +278,62 @@ export function providerAlertEmbed(alert: ProviderAlert): EmbedBuilder {
     .addFields(fields)
     .setFooter({ text: "Market Sentinel health monitor" })
     .setTimestamp(alert.timestamp);
+}
+
+/**
+ * A proposal that cleared every check. Phase B is shadow mode: this is what
+ * WOULD go to approval, announced so its quality can be judged before any
+ * approval path exists. Dissent is always shown, or "Unanimous" said outright —
+ * a missing dissent field must never be ambiguous with "nobody objected".
+ */
+export function shadowProposalEmbed(record: DecisionRecord): EmbedBuilder {
+  const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n * 100)}%`);
+  const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+  const c = record.confidence;
+  const s = record.sentinel;
+
+  const voteLines = record.votes.map((v) => {
+    const name = v.agent[0].toUpperCase() + v.agent.slice(1);
+    if (!v.evaluated) return `**${name}** — not evaluated yet`;
+    return `**${name}** — ${v.direction} @ ${pct(v.confidence)}${v.isDissent ? " ⚠️ dissent" : ""}`;
+  });
+
+  const dissent = record.votes.filter((v) => v.isDissent);
+  const dissentText = dissent.length
+    ? dissent.map((v) => `**${v.agent}:** ${clip(v.rationale, 400)}`).join("\n")
+    : "Unanimous — no agent dissented.";
+
+  const dialogue = record.dialogue.ran
+    ? `${record.dialogue.turns.length} turns; confidence ${pct(record.preDialogueConfidence)} → ${pct(c?.confidence)}`
+    : record.dialogue.skippedReason ?? "Did not run";
+
+  const fields = [
+    {
+      name: "Confidence",
+      value: c
+        ? `**${pct(c.confidence)}** (gate ${pct(c.threshold)}) = (½·${pct(c.sentinelConviction)} + ½·${pct(c.researchSupport)}) × ${c.agreementFactor} agreement × ${c.freshnessFactor} freshness`
+        : "—",
+      inline: false,
+    },
+    { name: "Votes", value: voteLines.join("\n"), inline: false },
+    { name: "Dissent", value: dissentText, inline: false },
+    { name: "Dialogue", value: dialogue, inline: false },
+  ];
+  if (s) {
+    fields.push({
+      name: "Levels",
+      value: `Entry ${formatUsd(s.entry)} · Stop ${formatUsd(s.stop)} · Target ${formatUsd(s.target)}`,
+      inline: false,
+    });
+  }
+
+  return new EmbedBuilder()
+    .setTitle(`🧪 Shadow proposal: ${record.proposedCall?.replace("_", " ") ?? record.action} ${record.symbol}`)
+    .setColor(COLOR_BLUE)
+    .setDescription("Cleared every check and **would go to you for approval**. Shadow mode: logged only — no order is placed.")
+    .addFields(fields)
+    .setFooter({ text: `Decision record #${record.id ?? "unsaved"} · Market Sentinel orchestrator · not financial advice` })
+    .setTimestamp(record.createdAt);
 }
 
 export function signalEmbed(signal: GradedSignal): EmbedBuilder {

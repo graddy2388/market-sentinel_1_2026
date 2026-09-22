@@ -7,12 +7,13 @@ import {
 } from "discord.js";
 import { appConfig } from "../../config.js";
 import { commands, handlePrice, handleAnalyze, handleAlerts, handleHelp } from "./commands.js";
-import { alertEmbed, signalEmbed, providerAlertEmbed } from "./embeds.js";
+import { alertEmbed, signalEmbed, providerAlertEmbed, shadowProposalEmbed } from "./embeds.js";
 import { handleChatMessage, handleImageMessage, type ChatResponse } from "./chat.js";
 import { startBriefingScheduler, stopBriefingScheduler } from "./briefing.js";
 import type { TriggeredAlert } from "../../alerts/engine.js";
 import type { GradedSignal } from "../../signals/scorer.js";
 import type { ProviderAlert } from "../../ai/health.js";
+import type { DecisionRecord } from "../../agents/types.js";
 
 let client: Client | null = null;
 let alertChannelId: string | null = null;
@@ -197,6 +198,20 @@ export async function sendProviderAlert(alert: ProviderAlert): Promise<void> {
     }
   } catch (err) {
     console.error("[Discord] Failed to send provider alert:", err);
+  }
+}
+
+/** Announce a proposal that cleared every check (Phase B shadow mode — nothing is executed). */
+export async function sendShadowProposal(record: DecisionRecord): Promise<void> {
+  if (!client || !alertChannelId) return;
+
+  try {
+    const channel = await client.channels.fetch(alertChannelId);
+    if (channel && channel.isTextBased() && "send" in channel) {
+      await (channel as TextChannel).send({ embeds: [shadowProposalEmbed(record)] });
+    }
+  } catch (err) {
+    console.error("[Discord] Failed to send shadow proposal:", err);
   }
 }
 

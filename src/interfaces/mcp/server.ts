@@ -12,6 +12,8 @@ import { DataManager } from "../../data/manager.js";
 import { startSignalMonitor, stopSignalMonitor } from "../../signals/monitor.js";
 import { bus } from "../../events/bus.js";
 import { onProviderAlert } from "../../ai/health.js";
+import { proposeTrade } from "../../agents/orchestrator.js";
+import { actionFor } from "../../agents/consensus.js";
 import { handleDashboardRequest } from "../web/dashboard.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
@@ -618,6 +620,20 @@ async function startHttp() {
       } catch (err) {
         console.error("[Market Sentinel] Failed to start Discord/alert engine:", err);
       }
+    }
+
+    // Phase B: each actionable signal runs the multi-agent pipeline. Every
+    // decision is logged; eligible ones are announced as shadow proposals.
+    // Nothing is ever executed. Registered before the monitor starts so its
+    // first sweep's signals aren't missed.
+    if (hasAnyAI()) {
+      const announce = hasDiscord() ? (await import("../discord/bot.js")).sendShadowProposal : null;
+      bus.onSignal((signal) => {
+        if (!actionFor(signal.call)) return;
+        proposeTrade(signal.symbol, "signal")
+          .then((record) => (record.status === "eligible" && announce ? announce(record) : undefined))
+          .catch((err) => console.error("[Market Sentinel] Proposal pipeline error:", err));
+      });
     }
 
     // Started only after Discord is up: the first sweep runs immediately, and a

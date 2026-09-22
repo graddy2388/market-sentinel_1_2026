@@ -25,8 +25,13 @@ import { executeTool, type ToolArtifacts } from "./tools/executor.js";
  */
 export const MAX_ROUNDS = 4;
 export const MAX_TOOL_CALLS = 6;
-/** run_analysis fires a full council (one call per model) — strictly rationed. */
+/**
+ * Expensive tools share this per-message allowance: run_analysis fires a full
+ * council (one call per model), and evaluate_trade runs the whole multi-agent
+ * pipeline on top of that.
+ */
 export const MAX_ANALYSIS_CALLS = 1;
+const RATIONED_TOOLS: ReadonlySet<string> = new Set(["run_analysis", "evaluate_trade"]);
 
 export interface ToolConversationOptions {
   system: string;
@@ -52,15 +57,15 @@ class ToolBudget {
     if (this.calls >= MAX_TOOL_CALLS) {
       return `Tool call limit (${MAX_TOOL_CALLS}) reached for this message. Answer with what you already have.`;
     }
-    if (name === "run_analysis" && this.analysisCalls >= MAX_ANALYSIS_CALLS) {
-      return `run_analysis may only be called ${MAX_ANALYSIS_CALLS} time(s) per message. Use get_market_data or summarize what you have.`;
+    if (RATIONED_TOOLS.has(name) && this.analysisCalls >= MAX_ANALYSIS_CALLS) {
+      return `Only ${MAX_ANALYSIS_CALLS} expensive call (run_analysis or evaluate_trade) is allowed per message. Use get_market_data or summarize what you have.`;
     }
     return null;
   }
 
   record(name: string): void {
     this.calls++;
-    if (name === "run_analysis") this.analysisCalls++;
+    if (RATIONED_TOOLS.has(name)) this.analysisCalls++;
     this.used.push(name);
   }
 

@@ -80,6 +80,53 @@ CREATE TABLE IF NOT EXISTS signal_history (
 
 CREATE INDEX IF NOT EXISTS idx_signal_history_symbol_created
   ON signal_history(symbol, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS trade_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL,
+  action TEXT CHECK(action IN ('BUY', 'SELL')),
+  proposed_call TEXT,
+  status TEXT NOT NULL CHECK(status IN ('no_action', 'vetoed', 'below_threshold', 'eligible', 'error')),
+  confidence REAL,
+  pre_dialogue_confidence REAL,
+  threshold REAL NOT NULL,
+  entry REAL,
+  stop REAL,
+  target REAL,
+  trigger TEXT NOT NULL,
+  veto_reason TEXT,
+  summary TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_proposals_created
+  ON trade_proposals(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_votes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id INTEGER NOT NULL REFERENCES trade_proposals(id),
+  agent TEXT NOT NULL CHECK(agent IN ('sentinel', 'research', 'execution')),
+  direction TEXT,
+  confidence REAL,
+  rationale TEXT NOT NULL,
+  is_dissent INTEGER NOT NULL,
+  veto TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_votes_proposal ON agent_votes(proposal_id);
+
+CREATE TABLE IF NOT EXISTS dialogue_transcripts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id INTEGER NOT NULL REFERENCES trade_proposals(id),
+  round INTEGER NOT NULL,
+  agent TEXT NOT NULL CHECK(agent IN ('sentinel', 'research')),
+  message TEXT NOT NULL,
+  confidence_before REAL,
+  confidence_after REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dialogue_proposal ON dialogue_transcripts(proposal_id);
 `;
 
 export async function getDb() {

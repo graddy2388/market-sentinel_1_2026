@@ -237,3 +237,24 @@ describe("runToolConversation — OpenAI tool flow", () => {
     expect(result.text).toBe("recovered");
   });
 });
+
+describe("evaluate_trade shares the expensive-call budget", () => {
+  it("allows only one of run_analysis / evaluate_trade per message", async () => {
+    claudeToolTurnMock
+      .mockResolvedValueOnce(
+        toolReply([
+          { id: "a", name: "run_analysis", input: { symbol: "BTC" } },
+          { id: "b", name: "evaluate_trade", input: { symbol: "BTC" } },
+          { id: "c", name: "evaluate_trade", input: { symbol: "ETH" } },
+        ])
+      )
+      .mockResolvedValueOnce(textReply("done"));
+
+    await runToolConversation(baseOpts);
+
+    const expensive = executeToolMock.mock.calls.filter(
+      (c) => c[0] === "run_analysis" || c[0] === "evaluate_trade"
+    );
+    expect(expensive.length).toBe(MAX_ANALYSIS_CALLS);
+  });
+});
