@@ -33,10 +33,19 @@ export const MODELS = {
    */
   groq: "openai/gpt-oss-120b",
 
-  // Seats with no key configured. The IDs below are unverified and likely
-  // stale — check the provider's current catalogue before adding a key.
-  gemini: "gemini-2.0-flash",
+  /** Cheap Flash-Lite tier, via Google's OpenAI-compatible endpoint. Checked 2026-09-22. */
+  gemini: "gemini-3.5-flash-lite",
+
+  /**
+   * Checked 2026-09-22: `deepseek-chat` is gone; `deepseek-flash` is current.
+   * Note it defaults to THINKING mode, which spends output tokens on reasoning
+   * before the JSON verdict. Fine but not free: ~$0.15/$0.60 off-peak, double
+   * during 01:00-04:00 and 06:00-10:00 UTC on weekdays.
+   */
+  deepseek: "deepseek-flash",
+
+  // No key configured and not checked — verify against the provider's current
+  // catalogue before adding one.
   cohere: "command-r-plus",
   mistral: "mistral-small-latest",
-  deepseek: "deepseek-chat",
 } as const;
