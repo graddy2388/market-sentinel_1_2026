@@ -32,8 +32,29 @@ import type { Tick, MarketOverview, Candle, CandleInterval, MarketType } from ".
 // stablecoins).
 // ---------------------------------------------------------------------------
 
+export type CryptoSource = "binance" | "coingecko";
+
+/**
+ * Where each crypto symbol's data last came from. CoinGecko-backed coins share
+ * a tight rate budget (a few calls/min keyless), so background loops use this
+ * to poll them far less often than Binance-backed ones. It reflects the most
+ * recent fetch, so a transient Binance miss corrects itself on the next one.
+ */
+const cryptoSourceBySymbol = new Map<string, CryptoSource>();
+
+/** The source of this symbol's last crypto fetch, or undefined if never fetched. */
+export function getCryptoSource(symbol: string): CryptoSource | undefined {
+  return cryptoSourceBySymbol.get(symbol.toUpperCase());
+}
+
+/** Test helper. */
+export function _resetCryptoSources(): void {
+  cryptoSourceBySymbol.clear();
+}
+
 async function cryptoFetch24hr(symbol: string): Promise<MarketOverview | null> {
   const b = await fetchBinance24hr(symbol);
+  cryptoSourceBySymbol.set(symbol, b ? "binance" : "coingecko");
   if (b) {
     return {
       symbol,
@@ -55,6 +76,7 @@ async function cryptoFetchCandles(
   limit: number
 ): Promise<Candle[]> {
   const klines = await fetchBinanceKlines(symbol, interval, limit);
+  cryptoSourceBySymbol.set(symbol, klines.length > 0 ? "binance" : "coingecko");
   if (klines.length > 0) return klines;
   return cgFetchCandles(symbol, interval, limit);
 }

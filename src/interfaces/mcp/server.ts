@@ -30,7 +30,7 @@ import {
   descriptionSchema,
   notesSchema,
 } from "../../validation.js";
-import { addToWatchlist, removeFromWatchlist } from "../../state/watchlist.js";
+import { addToWatchlist, removeFromWatchlist, listWatchlist } from "../../state/watchlist.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -170,7 +170,10 @@ function createMcpServer(): McpServer {
     {
       action: z.enum(["list", "add", "remove"]),
       symbol: symbolSchema.optional().describe("Symbol (required for add/remove)"),
-      market: z.enum(["crypto", "stock", "commodity"]).default("crypto"),
+      // Omitted = detect. A "crypto" default mislabeled stocks added without it,
+      // and the signal monitor selects what to score by this tag.
+      market: z.enum(["crypto", "stock", "commodity"]).optional()
+        .describe("Market (auto-detected when omitted)"),
     },
     async ({ action, symbol, market }) => {
       const db = await getDb();
@@ -391,44 +394,27 @@ const MAX_SESSIONS = 100;              // cap concurrent sessions
 const sessionLastSeen = new Map<string, number>();
 
 async function startHttp() {
-  // Start background poller with symbols from the DB watchlist, and activate
-  // the live Binance WebSocket + reactive signal monitor for crypto symbols.
-  try {
-    const db = await getDb();
-    const items = db.select().from(watchlist).all();
-    const symbols = items.map((row) => row.symbol);
-    if (symbols.length > 0) {
-      startPoller(symbols);
-    } else {
-      console.log("[Market Sentinel] Watchlist is empty — poller not started. Add symbols via manage-watchlist.");
-    }
+  // The poller re-reads the watchlist every cycle, so adds and removals take
+  // effect without a restart.
+  startPoller(async () => (await listWatchlist()).map((entry) => entry.symbol));
 
-    // Live streaming is crypto-only (Binance). Use the actual crypto watchlist
-    // rows — NOT every known crypto symbol — so we don't subscribe to
-    // stablecoins or symbols without a Binance USDT pair.
-    const cryptoWatchlist = items
-      .filter((row) => row.market === "crypto")
-      .map((row) => row.symbol.toUpperCase());
+  // The Binance stream now only feeds live ticks to the dashboard; signal
+  // scoring no longer depends on it. Its symbol list is still fixed at startup.
+  // Use the actual crypto watchlist rows — NOT every known crypto symbol — so
+  // we don't subscribe to stablecoins or symbols without a Binance USDT pair.
+  try {
+    const cryptoWatchlist = (await listWatchlist())
+      .filter((entry) => entry.market === "crypto")
+      .map((entry) => entry.symbol);
     if (cryptoWatchlist.length > 0) {
       dataManager = new DataManager(cryptoWatchlist);
       dataManager.on("connected", () => console.log("[Market Sentinel] Binance stream connected"));
       dataManager.on("disconnected", () => console.log("[Market Sentinel] Binance stream disconnected"));
       dataManager.on("error", (err: Error) => console.error("[Market Sentinel] Binance stream error:", err.message));
       dataManager.start();
-      startSignalMonitor(dataManager);
-      // Push graded-signal changes to Discord when configured.
-      if (hasDiscord()) {
-        const { sendSignalNotification } = await import("../discord/bot.js");
-        bus.onSignal((signal) => {
-          sendSignalNotification(signal).catch((err) =>
-            console.error("[Market Sentinel] Signal notification error:", err)
-          );
-        });
-      }
-      console.log(`[Market Sentinel] Live signal monitor active for: ${cryptoWatchlist.join(", ")}`);
     }
   } catch (err) {
-    console.warn("[Market Sentinel] Could not read watchlist for poller/monitor:", err);
+    console.warn("[Market Sentinel] Could not read watchlist for the live stream:", err);
   }
 
   const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -605,7 +591,9 @@ async function startHttp() {
     // Start Discord bot + alert engine if configured
     if (hasDiscord()) {
       try {
-        const { startDiscordBot, sendAlertNotification } = await import("../discord/bot.js");
+        const { startDiscordBot, sendAlertNotification, sendSignalNotification } = await import(
+          "../discord/bot.js"
+        );
         const { startAlertEngine } = await import("../../alerts/engine.js");
 
         await startDiscordBot();
@@ -614,11 +602,22 @@ async function startHttp() {
             console.error("[Market Sentinel] Alert notification error:", err)
           );
         });
+        // Push graded-signal changes to Discord.
+        bus.onSignal((signal) => {
+          sendSignalNotification(signal).catch((err) =>
+            console.error("[Market Sentinel] Signal notification error:", err)
+          );
+        });
         console.log("[Market Sentinel] Discord bot and alert engine started");
       } catch (err) {
         console.error("[Market Sentinel] Failed to start Discord/alert engine:", err);
       }
     }
+
+    // Started only after Discord is up: the first sweep runs immediately, and a
+    // signal it pushes before the bot logs in would be recorded as posted while
+    // never reaching the channel.
+    startSignalMonitor(dataManager);
   });
 
   // Graceful shutdown

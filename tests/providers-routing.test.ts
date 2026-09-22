@@ -37,7 +37,7 @@ vi.mock("../src/data/finnhub.js", () => ({
 
 // Real in-memory cache class, but a fresh instance per test via clear().
 import { cache } from "../src/data/cache.js";
-const { fetch24hr, fetch24hrCached, fetchCandles, fetchCandlesCached, fetchPrice } = await import(
+const { fetch24hr, fetch24hrCached, fetchCandles, fetchCandlesCached, fetchPrice, getCryptoSource, _resetCryptoSources } = await import(
   "../src/data/providers.js"
 );
 
@@ -53,6 +53,7 @@ function makeCandles(n: number, symbol = "BTC"): Candle[] {
 
 beforeEach(() => {
   cache.clear();
+  _resetCryptoSources();
   binance24hrMock.mockReset();
   binanceKlinesMock.mockReset();
   binancePriceMock.mockReset();
@@ -196,5 +197,39 @@ describe("fetch24hrCached", () => {
     expect(first!.price).toBe(64000);
     expect(second!.price).toBe(64000);
     expect(binance24hrMock).toHaveBeenCalledTimes(1); // second hit came from cache
+  });
+});
+
+describe("getCryptoSource — lets background loops spare CoinGecko's rate budget", () => {
+  it("is undefined before a symbol has been fetched", () => {
+    expect(getCryptoSource("BTC")).toBeUndefined();
+  });
+
+  it("records binance when Binance answered", async () => {
+    binance24hrMock.mockResolvedValue({
+      price: 1, change: 0, changePercent: 0, volume: 1, quoteVolume: 1, high: 1, low: 1,
+    });
+    await fetch24hr("BTC");
+    expect(getCryptoSource("BTC")).toBe("binance");
+  });
+
+  it("records coingecko when Binance has no pair (candles path)", async () => {
+    binanceKlinesMock.mockResolvedValue([]);
+    cgCandlesMock.mockResolvedValue(makeCandles(20, "LEO"));
+    await fetchCandles("LEO", "1h", 20);
+    expect(getCryptoSource("LEO")).toBe("coingecko");
+  });
+
+  it("corrects itself when Binance recovers", async () => {
+    binance24hrMock.mockResolvedValueOnce(null);
+    cg24hrMock.mockResolvedValue(null);
+    await fetch24hr("BTC");
+    expect(getCryptoSource("BTC")).toBe("coingecko");
+
+    binance24hrMock.mockResolvedValueOnce({
+      price: 1, change: 0, changePercent: 0, volume: 1, quoteVolume: 1, high: 1, low: 1,
+    });
+    await fetch24hr("BTC");
+    expect(getCryptoSource("BTC")).toBe("binance");
   });
 });

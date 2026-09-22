@@ -1,30 +1,39 @@
 /**
- * Reactive signal monitor.
+ * Signal monitor.
  *
- * Subscribes to the live DataManager: forwards ticks to the event bus (for the
- * dashboard) and, on each closed candle, re-scores the symbol's graded signal.
+ * Every SWEEP_INTERVAL_MS it reads the watchlist and re-scores each crypto
+ * symbol's graded signal. If a live DataManager is supplied, its ticks are
+ * forwarded to the event bus for the dashboard.
+ *
+ * Why a sweep and not the Binance stream: evaluation used to fire on each
+ * closed 1-minute candle from the stream, whose symbol list is fixed at
+ * startup. Coins without a Binance pair (VVV) were never scored at all, and
+ * coins added later weren't scored until a restart. The sweep reads the
+ * watchlist every time and uses the provider router, so any coin with candle
+ * data — Binance or CoinGecko — is covered. Posting is throttled to hourly
+ * anyway (see hasSignalChanged), so 1-minute evaluation bought nothing.
+ *
+ * Stocks are left out: Finnhub's candle endpoint is premium-gated on the free
+ * plan, so there's nothing to score them from yet.
  *
  * Cost control:
- * - The technical read is recomputed on every candle close (cheap, local).
- * - The AI council is refreshed at most once per COUNCIL_TTL_MS per symbol
- *   (lazy, on candle close); a fresher cached council is reused. A council that
- *   returns zero votes (all providers failed) is treated as absent.
- * - A per-symbol in-flight guard prevents overlapping evaluations.
- * - Pushes are gated by hasSignalChanged (call change or >0.15 conviction move).
- *
- * Candles come from the unified provider router — Binance first (with
- * .com→.us host failover), CoinGecko as last resort — so the monitor keeps
- * working even when a data source is unreachable.
+ * - The technical read is recomputed each sweep (cheap, local).
+ * - The AI council is refreshed at most once per COUNCIL_TTL_MS per symbol; a
+ *   fresher cached council is reused. A council that returns zero votes (all
+ *   providers failed) is treated as absent.
+ * - A per-symbol in-flight guard prevents overlapping evaluations, and symbols
+ *   within a sweep are staggered so a long watchlist doesn't burst providers.
+ * - Pushes are gated by hasSignalChanged.
  */
 import type { DataManager } from "../data/manager.js";
-import type { Tick, Candle } from "../data/types.js";
+import type { Tick } from "../data/types.js";
 import { fetchCandlesCached } from "../data/providers.js";
 import { analyzeTechnicals } from "../analysis/signals.js";
 import { councilAnalyze } from "../ai/council.js";
 import { hasAnyAI } from "../config.js";
 import { scoreSignal } from "./scorer.js";
 import { getLatestSignal, insertSignal, hasSignalChanged } from "./store.js";
-import { isWatched } from "../state/watchlist.js";
+import { isWatched, listWatchlist } from "../state/watchlist.js";
 import { bus } from "../events/bus.js";
 import type { CouncilAnalysisResult } from "../ai/types.js";
 import type { GradedSignal } from "./scorer.js";
@@ -35,6 +44,12 @@ export const COUNCIL_TTL_MS = 15 * 60_000; // 15 minutes
 /** Minimum 1h candles needed for a technical read. */
 const MIN_CANDLES = 14;
 
+/** How often every watched crypto symbol is re-scored. */
+export const SWEEP_INTERVAL_MS = 5 * 60_000;
+
+/** Gap between symbols within one sweep. */
+const SWEEP_STAGGER_MS = 2_000;
+
 interface CachedCouncil {
   result: CouncilAnalysisResult;
   at: number;
@@ -44,6 +59,12 @@ const lastCouncilBySymbol = new Map<string, CachedCouncil>();
 const inFlight = new Set<string>();
 
 let unsubscribers: Array<() => void> = [];
+let sweepTimer: ReturnType<typeof setInterval> | null = null;
+let sweeping = false;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Whether a cached council is still fresh enough to reuse. */
 export function isCouncilFresh(at: number, now = Date.now()): boolean {
@@ -112,35 +133,71 @@ export async function evaluateSymbol(symbol: string): Promise<GradedSignal | nul
 }
 
 /**
- * Start the reactive monitor against a live DataManager.
- * Forwards ticks to the bus and re-scores on each closed candle.
+ * Re-score every crypto symbol currently on the watchlist, one at a time.
+ * Returns the signals that were pushed. Never throws; a sweep already in
+ * progress makes this a no-op rather than a second concurrent pass.
  */
-export function startSignalMonitor(dataManager: DataManager): void {
+export async function runSweep(
+  opts: { staggerMs?: number } = {}
+): Promise<GradedSignal[]> {
+  if (sweeping) return [];
+  sweeping = true;
+  const staggerMs = opts.staggerMs ?? SWEEP_STAGGER_MS;
+
+  try {
+    const symbols = (await listWatchlist())
+      .filter((entry) => entry.market === "crypto")
+      .map((entry) => entry.symbol);
+
+    const pushed: GradedSignal[] = [];
+    for (let i = 0; i < symbols.length; i++) {
+      // evaluateSymbol catches its own errors, so one bad symbol can't end the sweep.
+      const signal = await evaluateSymbol(symbols[i]);
+      if (signal) pushed.push(signal);
+      if (staggerMs > 0 && i < symbols.length - 1) await sleep(staggerMs);
+    }
+    return pushed;
+  } catch (err) {
+    console.error("[Monitor] Sweep failed:", err);
+    return [];
+  } finally {
+    sweeping = false;
+  }
+}
+
+/**
+ * Start the monitor: a sweep now, then every SWEEP_INTERVAL_MS. Pass the live
+ * DataManager, if there is one, to forward its ticks to the dashboard.
+ */
+export function startSignalMonitor(dataManager?: DataManager | null): void {
   stopSignalMonitor();
 
-  const onTick = (tick: Tick) => {
-    // Forward live ticks for the dashboard.
-    bus.emitTick(tick);
-  };
-  const onCandle = (candle: Candle) => {
-    void evaluateSymbol(candle.symbol);
-  };
+  if (dataManager) {
+    const onTick = (tick: Tick) => {
+      // Forward live ticks for the dashboard.
+      bus.emitTick(tick);
+    };
+    dataManager.on("tick", onTick);
+    unsubscribers = [() => dataManager.off("tick", onTick)];
+  }
 
-  dataManager.on("tick", onTick);
-  dataManager.on("candle", onCandle);
+  void runSweep();
+  sweepTimer = setInterval(() => void runSweep(), SWEEP_INTERVAL_MS);
+  sweepTimer.unref?.();
 
-  unsubscribers = [
-    () => dataManager.off("tick", onTick),
-    () => dataManager.off("candle", onCandle),
-  ];
-
-  console.log("[Monitor] Signal monitor started");
+  console.log(
+    `[Monitor] Signal monitor started — sweeping the crypto watchlist every ${SWEEP_INTERVAL_MS / 60_000} min`
+  );
 }
 
 /** Stop the monitor and clear subscriptions + caches. */
 export function stopSignalMonitor(): void {
   for (const unsub of unsubscribers) unsub();
   unsubscribers = [];
+  if (sweepTimer) {
+    clearInterval(sweepTimer);
+    sweepTimer = null;
+  }
   lastCouncilBySymbol.clear();
   inFlight.clear();
 }
@@ -149,4 +206,5 @@ export function stopSignalMonitor(): void {
 export function _resetMonitorState(): void {
   lastCouncilBySymbol.clear();
   inFlight.clear();
+  sweeping = false;
 }

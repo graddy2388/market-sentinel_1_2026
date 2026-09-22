@@ -81,9 +81,9 @@ export async function getAllLatestSignals(): Promise<GradedSignal[]> {
  * Minimum time between posts for the same symbol, unless the signal flips
  * between bullish and bearish.
  *
- * The monitor re-scores on every 1-minute candle, and the 1h indicators include
- * the still-forming hour, so strength can swing within minutes. Without this,
- * XRP posted STRONG BUY -> BUY -> STRONG BUY in seven minutes.
+ * The monitor re-scores every few minutes, and the 1h indicators include the
+ * still-forming hour, so strength can swing within minutes. Without this, XRP
+ * posted STRONG BUY -> BUY -> STRONG BUY in seven minutes.
  */
 export const MIN_REPOST_INTERVAL_MS = 60 * 60_000;
 

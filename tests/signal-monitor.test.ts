@@ -53,12 +53,14 @@ vi.mock("../src/signals/store.js", async (importOriginal) => {
 
 let watched = true;
 const isWatchedMock = vi.fn(async () => watched);
+let watchlistEntries: Array<{ symbol: string; market: string; addedAt: string }> = [];
 vi.mock("../src/state/watchlist.js", () => ({
   isWatched: (...args: unknown[]) => isWatchedMock(...args),
+  listWatchlist: vi.fn(async () => watchlistEntries),
 }));
 
 // Import AFTER mocks are registered.
-const { evaluateSymbol, isCouncilFresh, COUNCIL_TTL_MS, _resetMonitorState } = await import(
+const { evaluateSymbol, isCouncilFresh, COUNCIL_TTL_MS, _resetMonitorState, runSweep, startSignalMonitor, stopSignalMonitor } = await import(
   "../src/signals/monitor.js"
 );
 const { bus } = await import("../src/events/bus.js");
@@ -99,6 +101,7 @@ beforeEach(() => {
   insertSignalMock.mockClear();
   watched = true;
   fetchCandlesCachedMock.mockClear();
+  watchlistEntries = [];
 });
 
 describe("isCouncilFresh", () => {
@@ -210,5 +213,96 @@ describe("evaluateSymbol", () => {
     const result = await evaluateSymbol("BTC");
     expect(result).toBeNull();
     expect(insertSignalMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runSweep — scores whatever is on the watchlist right now", () => {
+  const entry = (symbol: string, market = "crypto") => ({ symbol, market, addedAt: "" });
+  const sweptSymbols = () => fetchCandlesCachedMock.mock.calls.map((c) => c[0]);
+
+  it("scores every crypto symbol, including ones with no Binance pair (VVV)", async () => {
+    watchlistEntries = [entry("XRP"), entry("VVV")];
+
+    await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toEqual(["XRP", "VVV"]);
+  });
+
+  it("skips stocks — there are no candles to score them from yet", async () => {
+    watchlistEntries = [entry("BTC"), entry("SPY", "stock")];
+
+    await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toEqual(["BTC"]);
+  });
+
+  it("picks up a coin added between sweeps, with no restart", async () => {
+    watchlistEntries = [entry("BTC")];
+    await runSweep({ staggerMs: 0 });
+
+    watchlistEntries = [entry("BTC"), entry("VVV")];
+    fetchCandlesCachedMock.mockClear();
+    await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toContain("VVV");
+  });
+
+  it("returns the signals it pushed", async () => {
+    watchlistEntries = [entry("BTC")];
+
+    const pushed = await runSweep({ staggerMs: 0 });
+
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0].call).toBe("STRONG_BUY");
+  });
+
+  it("keeps going when one symbol fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    watchlistEntries = [entry("BAD"), entry("BTC")];
+    fetchCandlesCachedMock.mockImplementationOnce(async () => {
+      throw new Error("provider down");
+    });
+
+    const pushed = await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toEqual(["BAD", "BTC"]);
+    expect(pushed).toHaveLength(1);
+  });
+
+  it("won't start a second sweep while one is running", async () => {
+    watchlistEntries = [entry("BTC")];
+    let release!: (v: unknown) => void;
+    councilAnalyzeMock.mockReturnValue(new Promise((r) => { release = r; }));
+
+    const first = runSweep({ staggerMs: 0 });
+    const second = await runSweep({ staggerMs: 0 });
+    expect(second).toEqual([]);
+
+    release(makeCouncil("bullish", 0.8));
+    await first;
+    expect(councilAnalyzeMock).toHaveBeenCalledOnce();
+  });
+
+  it("no longer scores on stream candles — only ticks are forwarded", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { EventEmitter } = await import("events");
+    const fakeStream = new EventEmitter();
+    const ticks: unknown[] = [];
+    const off = bus.onTick((t) => ticks.push(t));
+
+    startSignalMonitor(fakeStream as never); // empty watchlist: the initial sweep is a no-op
+    await vi.waitFor(() => expect(fakeStream.listenerCount("tick")).toBe(1));
+    fetchCandlesCachedMock.mockClear();
+
+    fakeStream.emit("candle", { symbol: "BTC" });
+    fakeStream.emit("tick", { symbol: "BTC", price: 1 });
+    stopSignalMonitor();
+    off();
+
+    expect(fakeStream.listenerCount("candle")).toBe(0);
+    expect(fetchCandlesCachedMock).not.toHaveBeenCalled();
+    expect(ticks).toHaveLength(1);
+    // And stopping unsubscribes.
+    expect(fakeStream.listenerCount("tick")).toBe(0);
   });
 });

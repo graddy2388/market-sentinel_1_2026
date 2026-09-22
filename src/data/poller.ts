@@ -1,83 +1,104 @@
-import { fetch24hr } from "./providers.js";
+import { fetch24hr, getCryptoSource } from "./providers.js";
 import { cache } from "./cache.js";
 
 const POLL_INTERVAL_MS = 15_000; // 15 seconds
 const MAX_BATCH_SIZE = 5; // Stay well under CoinGecko's 10 req/min free-tier limit
 const STAGGER_DELAY_MS = 2_000; // 2 seconds between batches
 
+/**
+ * CoinGecko-backed coins (no Binance pair — VVV, LEO, ...) are polled at most
+ * this often. Keyless CoinGecko allows only a few calls a minute, and polling
+ * one such coin every 15s spent the entire budget on its own — starving chat
+ * and research of CoinGecko data.
+ */
+export const COINGECKO_MIN_POLL_MS = 5 * 60_000;
+
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let watchedSymbols: string[] = [];
+let symbolSource: () => Promise<string[]> = async () => [];
+let polling = false;
+const lastPolledAt = new Map<string, number>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Whether a symbol should be fetched this cycle, given where its data comes from. */
+export function isDueForPoll(symbol: string, now = Date.now()): boolean {
+  if (getCryptoSource(symbol) !== "coingecko") return true;
+  const last = lastPolledAt.get(symbol.toUpperCase());
+  return last == null || now - last >= COINGECKO_MIN_POLL_MS;
+}
+
 /**
- * Poll all watched symbols, batching requests and staggering
- * to respect CoinGecko's free-tier rate limit (10 req/min).
+ * Poll every due symbol, batching requests and staggering between batches.
  *
- * CoinGecko's /coins/{id} endpoint (used by fetch24hr) only accepts
- * one coin at a time, so we stagger individual requests in batches.
+ * The symbol list is re-read each cycle, so watchlist changes take effect
+ * without a restart. Overlapping cycles are skipped rather than stacked.
  */
-async function pollAll(): Promise<void> {
-  const symbols = [...watchedSymbols];
-  if (symbols.length === 0) return;
+export async function pollOnce(): Promise<void> {
+  if (polling) return;
+  polling = true;
+  try {
+    let symbols: string[];
+    try {
+      symbols = (await symbolSource()).map((s) => s.toUpperCase());
+    } catch (err) {
+      console.warn("[Poller] Could not read symbols:", err instanceof Error ? err.message : err);
+      return;
+    }
 
-  for (let i = 0; i < symbols.length; i += MAX_BATCH_SIZE) {
-    const batch = symbols.slice(i, i + MAX_BATCH_SIZE);
+    const now = Date.now();
+    const due = symbols.filter((s) => isDueForPoll(s, now));
 
-    // Fire all requests in this batch concurrently
-    const results = await Promise.allSettled(
-      batch.map(async (sym) => {
-        const data = await fetch24hr(sym);
-        if (data) {
-          cache.setPrice(sym, data);
+    for (let i = 0; i < due.length; i += MAX_BATCH_SIZE) {
+      const batch = due.slice(i, i + MAX_BATCH_SIZE);
+
+      const results = await Promise.allSettled(
+        batch.map(async (sym) => {
+          lastPolledAt.set(sym, Date.now());
+          const data = await fetch24hr(sym);
+          if (data) {
+            cache.setPrice(sym, data);
+          }
+        })
+      );
+
+      // Log any failures (non-fatal)
+      for (let j = 0; j < results.length; j++) {
+        const r = results[j];
+        if (r.status === "rejected") {
+          console.warn(`[Poller] Failed to fetch ${batch[j]}: ${r.reason}`);
         }
-      })
-    );
+      }
 
-    // Log any failures (non-fatal)
-    for (let j = 0; j < results.length; j++) {
-      const r = results[j];
-      if (r.status === "rejected") {
-        console.warn(`[Poller] Failed to fetch ${batch[j]}: ${r.reason}`);
+      // Stagger before the next batch to avoid rate-limit bursts
+      if (i + MAX_BATCH_SIZE < due.length) {
+        await sleep(STAGGER_DELAY_MS);
       }
     }
-
-    // Stagger before the next batch to avoid rate-limit bursts
-    if (i + MAX_BATCH_SIZE < symbols.length) {
-      await sleep(STAGGER_DELAY_MS);
-    }
+  } finally {
+    polling = false;
   }
 }
 
 /**
- * Start the background price poller for the given symbols.
- * If the poller is already running, it replaces the watched symbols
- * and restarts the interval.
+ * Start the background price poller.
+ *
+ * Takes a function rather than a list: the list used to be captured at
+ * startup, so coins added to the watchlist afterwards were never polled and
+ * removed ones kept being polled until a restart.
  */
-export function startPoller(symbols: string[]): void {
+export function startPoller(getSymbols: () => Promise<string[]>): void {
   stopPoller();
+  symbolSource = getSymbols;
 
-  watchedSymbols = symbols.map((s) => s.toUpperCase());
-  if (watchedSymbols.length === 0) {
-    console.log("[Poller] No symbols to watch — poller not started.");
-    return;
-  }
-
-  console.log(
-    `[Poller] Starting background poller for ${watchedSymbols.length} symbol(s): ${watchedSymbols.join(", ")}`
-  );
+  console.log("[Poller] Starting background poller (watchlist re-read each cycle)");
 
   // Fire an initial poll immediately (don't await — let it run in the background)
-  pollAll().catch((err) =>
-    console.error("[Poller] Initial poll error:", err)
-  );
+  pollOnce().catch((err) => console.error("[Poller] Initial poll error:", err));
 
   pollTimer = setInterval(() => {
-    pollAll().catch((err) =>
-      console.error("[Poller] Poll cycle error:", err)
-    );
+    pollOnce().catch((err) => console.error("[Poller] Poll cycle error:", err));
   }, POLL_INTERVAL_MS);
 }
 
@@ -88,5 +109,6 @@ export function stopPoller(): void {
     pollTimer = null;
     console.log("[Poller] Stopped.");
   }
-  watchedSymbols = [];
+  symbolSource = async () => [];
+  lastPolledAt.clear();
 }
