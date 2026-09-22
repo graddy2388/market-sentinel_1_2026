@@ -144,20 +144,133 @@ export function _resetDynamicCache(): void {
   dynamicIdCache.clear();
   discoveredSymbols.clear();
   coinContextCache.clear();
+  // Pacing state too: a test that fakes the clock would otherwise leave a
+  // pause set hours ahead for everything after it.
+  lastRequestAt = 0;
+  pausedUntil = 0;
+  usage.month = "";
+  usage.calls = 0;
+  usage.warned = false;
 }
 
 // ---------------------------------------------------------------------------
 // Transport
 //
-// Keyless access allows only a few calls per minute, then answers 429 with
-// Retry-After: 60. Coins that aren't on Binance (VVV and most small caps) route
-// price, candles, and research context all through CoinGecko, so one chat turn
-// can exhaust the budget. A free Demo key raises the limit to ~30/min.
+// Coins without a Binance pair (VVV and most small caps) get their price,
+// candles, and research context here, so this is the scarcest budget we have:
+//
+//   - Keyless: no monthly cap, but only a few calls per minute before a 429
+//     with Retry-After: 60. Bursts are what kill it, not volume.
+//   - Free Demo key: 100 calls/min but only 10,000 per MONTH, which continuous
+//     polling of even one coin would exhaust. Paid plans start at $29/mo.
+//
+// Both are burst-sensitive and one is volume-sensitive, so every request goes
+// through a single queue with a minimum gap between calls, and a 429 pauses the
+// queue for everyone. Callers with a cached copy serve that instead.
 // ---------------------------------------------------------------------------
 
 /** Read at call time so dotenv has already populated the environment. */
 function apiKey(): string | undefined {
   return process.env.COINGECKO_API_KEY || undefined;
+}
+
+/**
+ * Minimum gap between requests, adapted at runtime.
+ *
+ * CoinGecko's keyless limit is dynamic and undocumented: measured live, even
+ * 10 requests/min drew a 429 on the 5th. So the gap starts here, grows by half
+ * after every rate limit, and eases back while requests succeed.
+ */
+const DEFAULT_GAP_MS = 8_000;
+const MAX_GAP_MS = 60_000;
+let baseGapMs = DEFAULT_GAP_MS;
+let minRequestGapMs = DEFAULT_GAP_MS;
+/** How long a 429 stops all CoinGecko traffic (their Retry-After is 60s). */
+let rateLimitPauseMs = 60_000;
+/** A queued request that has waited longer than this fails instead of piling up. */
+let maxQueueWaitMs = 30_000;
+
+/** Current gap between requests, in ms. Grows while CoinGecko is rate-limiting us. */
+export function getCoinGeckoGapMs(): number {
+  return minRequestGapMs;
+}
+
+/** Test hook for pacing constants; also clears queue state. */
+export function _setCoinGeckoPacing(opts: { gapMs?: number; pauseMs?: number; maxWaitMs?: number }): void {
+  if (opts.gapMs !== undefined) {
+    baseGapMs = opts.gapMs;
+    minRequestGapMs = opts.gapMs;
+  }
+  if (opts.pauseMs !== undefined) rateLimitPauseMs = opts.pauseMs;
+  if (opts.maxWaitMs !== undefined) maxQueueWaitMs = opts.maxWaitMs;
+  lastRequestAt = 0;
+  pausedUntil = 0;
+}
+
+let requestChain: Promise<unknown> = Promise.resolve();
+let lastRequestAt = 0;
+let pausedUntil = 0;
+
+/**
+ * The Demo plan's 10,000 calls/month is a cliff: go past it and every request
+ * fails until the month rolls over. Counting in-process (so it resets with the
+ * container) is enough to see the trend in logs and warn before the cliff.
+ */
+const MONTHLY_CALL_BUDGET = 10_000;
+const usage = { month: "", calls: 0, warned: false };
+
+/** Calls made this calendar month, counted since the process started. */
+export function getCoinGeckoUsage(): { month: string; calls: number; budget: number } {
+  return { month: usage.month, calls: usage.calls, budget: MONTHLY_CALL_BUDGET };
+}
+
+function countCall(): void {
+  const month = new Date().toISOString().slice(0, 7);
+  if (usage.month !== month) {
+    usage.month = month;
+    usage.calls = 0;
+    usage.warned = false;
+  }
+  usage.calls++;
+  if (!usage.warned && usage.calls >= MONTHLY_CALL_BUDGET * 0.8) {
+    usage.warned = true;
+    console.warn(
+      `[CoinGecko] ${usage.calls} calls this month, against a ${MONTHLY_CALL_BUDGET} Demo-plan cap. ` +
+        "Drop a coin that isn't on Binance from the watchlist, or CoinGecko data will stop until next month."
+    );
+  }
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Run a request in the shared queue, spaced out and paused after a 429. */
+function schedule<T>(run: () => Promise<T>): Promise<T> {
+  const queuedAt = Date.now();
+  const result = requestChain.then(async () => {
+    const now = Date.now();
+    if (now - queuedAt > maxQueueWaitMs) {
+      throw new CoinGeckoError(429, "CoinGecko request queue is backed up — skipped rather than pile on");
+    }
+    // Clamped: a clock jump (or a system clock change) must not park the queue
+    // for hours on a stale lastRequestAt.
+    const wait = Math.min(
+      Math.max(pausedUntil - now, lastRequestAt + minRequestGapMs - now, 0),
+      Math.max(minRequestGapMs, rateLimitPauseMs)
+    );
+    if (wait > 0) await delay(wait);
+    lastRequestAt = Date.now();
+    countCall();
+    const result = await run();
+    // It went through: ease back toward the base pace.
+    minRequestGapMs = Math.max(baseGapMs, Math.round(minRequestGapMs * 0.9));
+    return result;
+  });
+  // Keep the chain alive regardless of outcome.
+  requestChain = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
 }
 
 /** A failed CoinGecko request. The message is written to be shown to a user. */
@@ -171,29 +284,38 @@ export class CoinGeckoError extends Error {
 /** Throttles the rate-limit warning so a polling loop can't flood the logs. */
 let lastRateLimitWarning = 0;
 
-async function cgFetch(path: string): Promise<unknown> {
-  const key = apiKey();
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (key) headers["x-cg-demo-api-key"] = key;
+function cgFetch(path: string): Promise<unknown> {
+  return schedule(async () => {
+    const key = apiKey();
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (key) headers["x-cg-demo-api-key"] = key;
 
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers,
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!res.ok) {
-    if (res.status === 429) {
-      const message = key
-        ? "CoinGecko rate limit hit"
-        : "CoinGecko rate limit hit (no COINGECKO_API_KEY set — keyless access allows only a few calls per minute)";
-      if (Date.now() - lastRateLimitWarning > 60_000) {
-        lastRateLimitWarning = Date.now();
-        console.warn(`[CoinGecko] ${message}`);
+    const res = await fetch(`${BASE_URL}${path}`, {
+      headers,
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) {
+      if (res.status === 429) {
+        // Stop everyone, not just this caller: the limit is per IP.
+        const retryAfter = Number(res.headers.get("retry-after"));
+        const pause = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : rateLimitPauseMs;
+        pausedUntil = Date.now() + pause;
+        // And go slower from here: their limit is lower than we assumed.
+        minRequestGapMs = Math.min(MAX_GAP_MS, Math.max(baseGapMs, Math.round(minRequestGapMs * 1.5)));
+
+        const message = key
+          ? `CoinGecko rate limit hit — the per-minute limit, or the Demo plan's 10,000/month cap (${usage.calls} calls counted since startup); pausing ${Math.round(pause / 1000)}s`
+          : `CoinGecko rate limit hit (no COINGECKO_API_KEY set — keyless allows only a few calls per minute); pausing ${Math.round(pause / 1000)}s`;
+        if (Date.now() - lastRateLimitWarning > 60_000) {
+          lastRateLimitWarning = Date.now();
+          console.warn(`[CoinGecko] ${message}`);
+        }
+        throw new CoinGeckoError(429, message);
       }
-      throw new CoinGeckoError(429, message);
+      throw new CoinGeckoError(res.status, `CoinGecko API error: ${res.status} ${res.statusText}`);
     }
-    throw new CoinGeckoError(res.status, `CoinGecko API error: ${res.status} ${res.statusText}`);
-  }
-  return res.json();
+    return res.json();
+  });
 }
 
 export async function fetchPrice(symbol: string): Promise<Tick | null> {

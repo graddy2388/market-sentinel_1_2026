@@ -19,9 +19,7 @@ vi.mock("../src/data/providers.js", () => ({
   getCryptoSource: (s: string) => sources.get(s.toUpperCase()),
 }));
 
-const { startPoller, stopPoller, pollOnce, isDueForPoll, COINGECKO_MIN_POLL_MS } = await import(
-  "../src/data/poller.js"
-);
+const { startPoller, stopPoller, pollOnce, isDueForPoll } = await import("../src/data/poller.js");
 
 let symbols: string[] = [];
 
@@ -93,22 +91,23 @@ describe("CoinGecko budget", () => {
     expect(polledSymbols()).toEqual(["BTC", "BTC"]);
   });
 
-  it("polls a CoinGecko-only coin at most once per interval (the VVV case)", async () => {
+  it("stops polling a coin once it's known to come from CoinGecko (the VVV case)", async () => {
+    // A 15s poll of one CoinGecko coin would spend ~86k calls/month against a
+    // 10k free budget. They're fetched on demand instead.
     sources.set("VVV", "coingecko");
-    symbols = ["VVV"];
-    await start(); // first poll happens
+    symbols = ["VVV", "BTC"];
+    sources.set("BTC", "binance");
+    await start();
 
     await pollOnce();
     await pollOnce();
-    expect(polledSymbols()).toEqual([]);
 
-    const later = Date.now() + COINGECKO_MIN_POLL_MS;
-    vi.spyOn(Date, "now").mockReturnValue(later);
-    await pollOnce();
-    expect(polledSymbols()).toEqual(["VVV"]);
+    expect(polledSymbols()).toEqual(["BTC", "BTC"]);
   });
 
-  it("treats a never-fetched symbol as due, so its source can be learned", () => {
+  it("polls a never-fetched symbol once, which is how its source is learned", () => {
     expect(isDueForPoll("NEW")).toBe(true);
+    sources.set("NEW", "coingecko");
+    expect(isDueForPoll("NEW")).toBe(false);
   });
 });

@@ -22,8 +22,10 @@ const candles: Candle[] = Array.from({ length: 20 }, (_, i) => ({
 }));
 
 const fetchCandlesCachedMock = vi.fn(async () => candles);
+const cryptoSources = new Map<string, "binance" | "coingecko">();
 vi.mock("../src/data/providers.js", () => ({
   fetchCandlesCached: (...args: unknown[]) => fetchCandlesCachedMock(...args),
+  getCryptoSource: (s: string) => cryptoSources.get(s.toUpperCase()),
 }));
 
 let mockTechnical: TechnicalSummary;
@@ -60,7 +62,7 @@ vi.mock("../src/state/watchlist.js", () => ({
 }));
 
 // Import AFTER mocks are registered.
-const { evaluateSymbol, isCouncilFresh, COUNCIL_TTL_MS, _resetMonitorState, runSweep, startSignalMonitor, stopSignalMonitor } = await import(
+const { evaluateSymbol, isCouncilFresh, COUNCIL_TTL_MS, _resetMonitorState, runSweep, startSignalMonitor, stopSignalMonitor, COINGECKO_SWEEP_INTERVAL_MS } = await import(
   "../src/signals/monitor.js"
 );
 const { bus } = await import("../src/events/bus.js");
@@ -102,6 +104,7 @@ beforeEach(() => {
   watched = true;
   fetchCandlesCachedMock.mockClear();
   watchlistEntries = [];
+  cryptoSources.clear();
 });
 
 describe("isCouncilFresh", () => {
@@ -245,6 +248,26 @@ describe("runSweep — scores whatever is on the watchlist right now", () => {
     await runSweep({ staggerMs: 0 });
 
     expect(sweptSymbols()).toContain("VVV");
+  });
+
+  it("paces CoinGecko-backed coins so they don't drain that budget", async () => {
+    cryptoSources.set("VVV", "coingecko");
+    cryptoSources.set("BTC", "binance");
+    watchlistEntries = [entry("BTC"), entry("VVV")];
+
+    await runSweep({ staggerMs: 0 });
+    expect(sweptSymbols()).toEqual(["BTC", "VVV"]);
+
+    fetchCandlesCachedMock.mockClear();
+    await runSweep({ staggerMs: 0 });
+    expect(sweptSymbols()).toEqual(["BTC"]); // VVV waits for its slower cadence
+
+    const later = Date.now() + COINGECKO_SWEEP_INTERVAL_MS;
+    vi.spyOn(Date, "now").mockReturnValue(later);
+    fetchCandlesCachedMock.mockClear();
+    await runSweep({ staggerMs: 0 });
+    expect(sweptSymbols()).toContain("VVV");
+    vi.restoreAllMocks();
   });
 
   it("returns the signals it pushed", async () => {

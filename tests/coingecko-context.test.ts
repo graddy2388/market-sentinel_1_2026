@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   fetchCoinContext,
   resolveCoinId,
+  getCoinGeckoUsage,
   _resetDynamicCache,
+  _setCoinGeckoPacing,
+  getCoinGeckoGapMs,
   CoinGeckoError,
 } from "../src/data/coingecko.js";
 
@@ -31,8 +34,14 @@ const coinPayload = {
   },
 };
 
-function respond(status: number, body: unknown = {}) {
-  return { ok: status >= 200 && status < 300, status, statusText: status === 429 ? "Too Many Requests" : "OK", json: async () => body };
+function respond(status: number, body: unknown = {}, headers: Record<string, string> = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 429 ? "Too Many Requests" : "OK",
+    headers: new Headers(headers),
+    json: async () => body,
+  };
 }
 
 /** Routes /search and /coins/{id}; returns the mock so calls can be inspected. */
@@ -51,6 +60,7 @@ function mockCoinGecko(opts: { coinStatus?: number; searchStatus?: number } = {}
 
 beforeEach(() => {
   _resetDynamicCache();
+  _setCoinGeckoPacing({ gapMs: 0, pauseMs: 0, maxWaitMs: 60_000 });
   delete process.env.COINGECKO_API_KEY;
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -106,8 +116,10 @@ describe("fetchCoinContext", () => {
 
     expect(err).toBeInstanceOf(CoinGeckoError);
     expect((err as CoinGeckoError).status).toBe(429);
-    // Keyless: the message names the fix.
+    // The message names the cause and what the system did — both reach the user.
+    // Keyless, so it points at the missing key rather than the monthly cap.
     expect((err as Error).message).toContain("COINGECKO_API_KEY");
+    expect((err as Error).message).toMatch(/pausing/);
   });
 
   it("also throws when the symbol lookup itself is rate limited", async () => {
@@ -157,5 +169,112 @@ describe("resolveCoinId keeps its lenient contract", () => {
     mockCoinGecko({ searchStatus: 429 });
 
     expect(await resolveCoinId("VVV")).toBeNull();
+  });
+});
+
+describe("request queue — the real protection for a tiny free budget", () => {
+  // Keyless CoinGecko 429s after a few calls in quick succession, and the free
+  // Demo key allows only 10k calls a MONTH. Every request goes through one
+  // paced queue so a burst can't happen.
+  it("spaces requests out instead of firing them together", async () => {
+    _setCoinGeckoPacing({ gapMs: 40, pauseMs: 0, maxWaitMs: 60_000 });
+    const at: number[] = [];
+    globalThis.fetch = vi.fn(async () => {
+      at.push(Date.now());
+      return respond(200, { coins: [] });
+    }) as unknown as typeof fetch;
+
+    await Promise.all(["AAA", "BBB", "CCC"].map((s) => resolveCoinId(s)));
+
+    expect(at).toHaveLength(3);
+    expect(at[1] - at[0]).toBeGreaterThanOrEqual(35);
+    expect(at[2] - at[1]).toBeGreaterThanOrEqual(35);
+  });
+
+  it("a 429 pauses every caller, not just the one that hit it", async () => {
+    _setCoinGeckoPacing({ gapMs: 0, pauseMs: 120, maxWaitMs: 60_000 });
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls++;
+      return calls === 1
+        ? { ok: false, status: 429, statusText: "Too Many Requests", headers: new Headers(), json: async () => ({}) }
+        : respond(200, { coins: [] });
+    }) as unknown as typeof fetch;
+
+    await resolveCoinId("AAA"); // eats the 429
+    const start = Date.now();
+    await resolveCoinId("BBB"); // queued behind the pause
+
+    expect(Date.now() - start).toBeGreaterThanOrEqual(100);
+  });
+
+  it("honours Retry-After in preference to its own default", async () => {
+    _setCoinGeckoPacing({ gapMs: 0, pauseMs: 5_000, maxWaitMs: 60_000 });
+    globalThis.fetch = vi.fn(async () => respond(429, {}, { "retry-after": "1" })) as unknown as typeof fetch;
+
+    await resolveCoinId("AAA"); // eats the 429, pauses for the server's 1s
+    const start = Date.now();
+    await resolveCoinId("BBB");
+    const waited = Date.now() - start;
+
+    expect(waited).toBeGreaterThanOrEqual(500); // it did wait
+    expect(waited).toBeLessThan(3_000); // but 1s from the header, not the 5s default
+  });
+
+  it("drops a request that has been queued too long rather than piling on", async () => {
+    _setCoinGeckoPacing({ gapMs: 60, pauseMs: 0, maxWaitMs: 1 });
+    globalThis.fetch = vi.fn(async () => respond(200, { coins: [] })) as unknown as typeof fetch;
+
+    const results = await Promise.allSettled(
+      ["AAA", "BBB", "CCC", "DDD"].map((s) => fetchCoinContext(s))
+    );
+
+    expect(results.some((r) => r.status === "rejected")).toBe(true);
+  });
+});
+
+describe("monthly usage counter", () => {
+  // The Demo plan's cap is monthly and silent — hitting it stops every
+  // CoinGecko request until the month rolls over, so the count must be visible.
+  it("counts every request against the Demo-plan budget", async () => {
+    globalThis.fetch = vi.fn(async () => respond(200, { coins: [] })) as unknown as typeof fetch;
+
+    await resolveCoinId("AAA");
+    await resolveCoinId("BBB");
+
+    const usage = getCoinGeckoUsage();
+    expect(usage.calls).toBe(2);
+    expect(usage.budget).toBe(10_000);
+    expect(usage.month).toBe(new Date().toISOString().slice(0, 7));
+  });
+
+  it("counts a rate-limited call too — it still spends budget", async () => {
+    globalThis.fetch = vi.fn(async () => respond(429, {})) as unknown as typeof fetch;
+
+    await resolveCoinId("AAA");
+
+    expect(getCoinGeckoUsage().calls).toBe(1);
+  });
+});
+
+describe("adaptive pacing", () => {
+  // Live measurement: CoinGecko 429'd on the 5th request even at 10/min, so a
+  // fixed gap can't be right. The pace backs off on a 429 and recovers after.
+  it("slows down after a rate limit and eases back on success", async () => {
+    _setCoinGeckoPacing({ gapMs: 20, pauseMs: 0, maxWaitMs: 60_000 });
+    let limitNext = true;
+    globalThis.fetch = vi.fn(async () => {
+      const res = limitNext ? respond(429) : respond(200, { coins: [] });
+      limitNext = false;
+      return res;
+    }) as unknown as typeof fetch;
+
+    await resolveCoinId("AAA"); // eats the 429
+    const afterLimit = getCoinGeckoGapMs();
+    expect(afterLimit).toBeGreaterThan(20);
+
+    for (let i = 0; i < 5; i++) await resolveCoinId(`OK${i}`);
+    expect(getCoinGeckoGapMs()).toBeLessThan(afterLimit);
+    expect(getCoinGeckoGapMs()).toBeGreaterThanOrEqual(20); // never faster than the base
   });
 });

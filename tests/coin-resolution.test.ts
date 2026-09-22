@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolveCoinId, _resetDynamicCache, getDiscoveredSymbols } from "../src/data/coingecko.js";
+import {
+  resolveCoinId,
+  _resetDynamicCache,
+  _setCoinGeckoPacing,
+  getDiscoveredSymbols,
+} from "../src/data/coingecko.js";
 
 /**
  * Dynamic symbol resolution. The curated map covers ~51 majors; CoinGecko lists
@@ -19,6 +24,8 @@ function mockSearch(coins: Array<{ id: string; symbol: string; name?: string; ma
 
 beforeEach(() => {
   _resetDynamicCache();
+  // The real transport paces requests seconds apart; not here.
+  _setCoinGeckoPacing({ gapMs: 0, pauseMs: 0, maxWaitMs: 60_000 });
 });
 
 afterEach(() => {

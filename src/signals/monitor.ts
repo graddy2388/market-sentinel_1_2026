@@ -27,7 +27,7 @@
  */
 import type { DataManager } from "../data/manager.js";
 import type { Tick } from "../data/types.js";
-import { fetchCandlesCached } from "../data/providers.js";
+import { fetchCandlesCached, getCryptoSource } from "../data/providers.js";
 import { analyzeTechnicals } from "../analysis/signals.js";
 import { councilAnalyze } from "../ai/council.js";
 import { hasAnyAI } from "../config.js";
@@ -47,6 +47,17 @@ const MIN_CANDLES = 14;
 
 /** How often every watched crypto symbol is re-scored. */
 export const SWEEP_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Coins that come from CoinGecko instead of Binance are re-scored on this
+ * slower schedule. CoinGecko's free budget is small (10k calls/month with a
+ * Demo key), and one candle fetch every 5 minutes would spend most of it on a
+ * single coin. Binance-backed coins keep the full sweep cadence.
+ */
+export const COINGECKO_SWEEP_INTERVAL_MS = 15 * 60_000;
+
+/** When each symbol was last scored, so CoinGecko-backed coins can be paced. */
+const lastEvaluatedAt = new Map<string, number>();
 
 /** Gap between symbols within one sweep. */
 const SWEEP_STAGGER_MS = 2_000;
@@ -152,6 +163,13 @@ export async function evaluateSymbol(symbol: string): Promise<GradedSignal | nul
   }
 }
 
+/** CoinGecko-backed coins are scored on a slower cadence to protect that budget. */
+export function isDueForSweep(symbol: string, now = Date.now()): boolean {
+  if (getCryptoSource(symbol) !== "coingecko") return true;
+  const last = lastEvaluatedAt.get(symbol.toUpperCase());
+  return last == null || now - last >= COINGECKO_SWEEP_INTERVAL_MS;
+}
+
 /**
  * Re-score every crypto symbol currently on the watchlist, one at a time.
  * Returns the signals that were pushed. Never throws; a sweep already in
@@ -171,6 +189,8 @@ export async function runSweep(
 
     const pushed: GradedSignal[] = [];
     for (let i = 0; i < symbols.length; i++) {
+      if (!isDueForSweep(symbols[i])) continue;
+      lastEvaluatedAt.set(symbols[i].toUpperCase(), Date.now());
       // evaluateSymbol catches its own errors, so one bad symbol can't end the sweep.
       const signal = await evaluateSymbol(symbols[i]);
       if (signal) pushed.push(signal);
@@ -226,5 +246,6 @@ export function stopSignalMonitor(): void {
 export function _resetMonitorState(): void {
   lastCouncilBySymbol.clear();
   inFlight.clear();
+  lastEvaluatedAt.clear();
   sweeping = false;
 }
