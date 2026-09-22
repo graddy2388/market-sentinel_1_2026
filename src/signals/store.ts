@@ -5,7 +5,7 @@
  * dashboard and Discord embeds can rehydrate the complete signal while the
  * monitor can cheaply query the latest call per symbol.
  */
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, gte } from "drizzle-orm";
 import { getDb, saveDb } from "../state/db.js";
 import { signalHistory } from "../state/schema.js";
 import type { GradedSignal } from "./scorer.js";
@@ -78,19 +78,71 @@ export async function getAllLatestSignals(): Promise<GradedSignal[]> {
 }
 
 /**
+ * Minimum time between posts for the same symbol, unless the signal flips
+ * between bullish and bearish.
+ *
+ * The monitor re-scores on every 1-minute candle, and the 1h indicators include
+ * the still-forming hour, so strength can swing within minutes. Without this,
+ * XRP posted STRONG BUY -> BUY -> STRONG BUY in seven minutes.
+ */
+export const MIN_REPOST_INTERVAL_MS = 60 * 60_000;
+
+type Side = "bullish" | "bearish" | "none";
+
+function sideOf(call: GradedSignal["call"]): Side {
+  if (call === "BUY" || call === "STRONG_BUY") return "bullish";
+  if (call === "SELL" || call === "STRONG_SELL") return "bearish";
+  return "none";
+}
+
+/**
  * Decide whether `next` is a meaningful change from `prev` worth pushing.
  *
- * Spam policy: notify on a call change (which also covers STRONG↔normal band
- * crossings, since those are distinct call values), or a conviction move
- * larger than the threshold for the same call. First-ever signal always counts.
+ * Spam policy:
+ * - HOLD never follows HOLD: movement below the action threshold (26% → 0%)
+ *   is noise, not news.
+ * - A bullish ↔ bearish flip always posts immediately — it's the one change
+ *   someone acting on the prior call can't afford to hear about late.
+ * - Anything else (a call change, or a conviction move beyond the threshold)
+ *   posts only once MIN_REPOST_INTERVAL_MS has passed since the last post.
+ *   Suppressed signals aren't persisted, so the comparison stays against what
+ *   the channel actually saw.
+ * - The first-ever actionable signal always posts.
  */
 export function hasSignalChanged(prev: GradedSignal | null, next: GradedSignal): boolean {
-  // HOLD means conviction sits below the action threshold — there's nothing to
-  // act on, so movement *within* HOLD (26% → 0%) is noise, not news. Only a move
-  // out of an actionable call into HOLD is worth reporting: "the BUY is off".
   if (next.call === "HOLD" && (!prev || prev.call === "HOLD")) return false;
   if (!prev) return true;
-  if (prev.call !== next.call) return true;
-  if (Math.abs(next.conviction - prev.conviction) > CONVICTION_DELTA_THRESHOLD) return true;
-  return false;
+
+  const prevSide = sideOf(prev.call);
+  const nextSide = sideOf(next.call);
+  if (prevSide !== "none" && nextSide !== "none" && prevSide !== nextSide) return true;
+
+  const changed =
+    prev.call !== next.call ||
+    Math.abs(next.conviction - prev.conviction) > CONVICTION_DELTA_THRESHOLD;
+  if (!changed) return false;
+
+  return next.timestamp - prev.timestamp >= MIN_REPOST_INTERVAL_MS;
+}
+
+/** Signals posted since `sinceMs`, newest first — what the channel has recently seen. */
+export async function getRecentSignals(sinceMs: number, limit = 5): Promise<GradedSignal[]> {
+  const db = await getDb();
+  const rows = db
+    .select()
+    .from(signalHistory)
+    .where(gte(signalHistory.createdAt, new Date(sinceMs).toISOString()))
+    .orderBy(desc(signalHistory.createdAt), desc(signalHistory.id))
+    .limit(limit)
+    .all();
+
+  const signals: GradedSignal[] = [];
+  for (const row of rows) {
+    try {
+      signals.push(JSON.parse(row.payload) as GradedSignal);
+    } catch {
+      // Skip corrupt payloads
+    }
+  }
+  return signals;
 }

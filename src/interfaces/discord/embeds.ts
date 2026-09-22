@@ -19,7 +19,10 @@ function directionColor(direction: SignalDirection): number {
 }
 
 function formatUsd(n: number): string {
-  if (Math.abs(n) >= 1) return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (Math.abs(n) >= 10) return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  // $1-$10 assets (XRP, etc.) move in fractions of a cent; two decimals made a
+  // stop and entry a cent apart print identically.
+  if (Math.abs(n) >= 1) return `$${n.toFixed(4)}`;
   return `$${n.toPrecision(4)}`;
 }
 

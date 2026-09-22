@@ -42,54 +42,87 @@ afterAll(() => {
 });
 
 describe("hasSignalChanged", () => {
-  it("returns true for the first signal (no prior)", () => {
-    expect(store.hasSignalChanged(null, makeSignal())).toBe(true);
-  });
+  const HOUR = 3_600_000;
+  const T0 = Date.UTC(2026, 8, 22, 13, 0, 0);
+  const at = (minutes: number) => T0 + minutes * 60_000;
 
-  it("returns true when the call changes", () => {
-    const prev = makeSignal({ call: "BUY" });
-    const next = makeSignal({ call: "STRONG_BUY" });
-    expect(store.hasSignalChanged(prev, next)).toBe(true);
-  });
-
-  it("returns true when conviction moves more than the threshold", () => {
-    const prev = makeSignal({ call: "BUY", conviction: 0.4 });
-    const next = makeSignal({ call: "BUY", conviction: 0.6 });
-    expect(store.hasSignalChanged(prev, next)).toBe(true);
-  });
-
-  it("returns false for a small conviction wiggle with the same call", () => {
-    const prev = makeSignal({ call: "BUY", conviction: 0.5 });
-    const next = makeSignal({ call: "BUY", conviction: 0.55 });
-    expect(store.hasSignalChanged(prev, next)).toBe(false);
-  });
-
-  it("never reports a first-ever HOLD — there is nothing to act on", () => {
-    expect(store.hasSignalChanged(null, makeSignal({ call: "HOLD", conviction: 0.1 }))).toBe(false);
-  });
-
-  it("ignores conviction movement within HOLD, however large", () => {
-    const prev = makeSignal({ call: "HOLD", conviction: 0.26 });
-    const next = makeSignal({ call: "HOLD", conviction: 0 });
-    expect(store.hasSignalChanged(prev, next)).toBe(false);
-  });
-
-  it("reports an actionable call dropping to HOLD — the setup is off", () => {
-    const prev = makeSignal({ call: "BUY", conviction: 0.4 });
-    const next = makeSignal({ call: "HOLD", conviction: 0.2 });
-    expect(store.hasSignalChanged(prev, next)).toBe(true);
-  });
-
-  it("reports HOLD becoming actionable", () => {
-    const prev = makeSignal({ call: "HOLD", conviction: 0.2 });
-    const next = makeSignal({ call: "BUY", conviction: 0.35 });
-    expect(store.hasSignalChanged(prev, next)).toBe(true);
+  it("posts the first actionable signal", () => {
+    expect(store.hasSignalChanged(null, makeSignal({ timestamp: at(0) }))).toBe(true);
   });
 
   it("returns false for an identical signal", () => {
-    const prev = makeSignal();
-    const next = makeSignal();
+    expect(store.hasSignalChanged(makeSignal({ timestamp: at(0) }), makeSignal({ timestamp: at(90) }))).toBe(false);
+  });
+
+  it("returns false for a small conviction wiggle with the same call", () => {
+    const prev = makeSignal({ call: "BUY", conviction: 0.5, timestamp: at(0) });
+    const next = makeSignal({ call: "BUY", conviction: 0.55, timestamp: at(90) });
     expect(store.hasSignalChanged(prev, next)).toBe(false);
+  });
+
+  describe("HOLD is not news", () => {
+    it("never reports a first-ever HOLD — there is nothing to act on", () => {
+      expect(store.hasSignalChanged(null, makeSignal({ call: "HOLD", conviction: 0.1 }))).toBe(false);
+    });
+
+    it("ignores conviction movement within HOLD, however large or late", () => {
+      const prev = makeSignal({ call: "HOLD", conviction: 0.26, timestamp: at(0) });
+      const next = makeSignal({ call: "HOLD", conviction: 0, timestamp: at(300) });
+      expect(store.hasSignalChanged(prev, next)).toBe(false);
+    });
+  });
+
+  describe("repost cooldown", () => {
+    it("holds back a same-side change inside the cooldown (the XRP STRONG BUY -> BUY -> STRONG BUY flap)", () => {
+      const strong = makeSignal({ call: "STRONG_BUY", conviction: 0.81, timestamp: at(0) });
+      const weaker = makeSignal({ call: "BUY", conviction: 0.61, timestamp: at(5) });
+      const strongAgain = makeSignal({ call: "STRONG_BUY", conviction: 0.81, timestamp: at(7) });
+
+      expect(store.hasSignalChanged(strong, weaker)).toBe(false);
+      // Suppressed signals aren't persisted, so the next comparison is still
+      // against the 9:07 post — and it's unchanged.
+      expect(store.hasSignalChanged(strong, strongAgain)).toBe(false);
+    });
+
+    it("posts a call change once the cooldown has passed", () => {
+      const prev = makeSignal({ call: "BUY", timestamp: at(0) });
+      const next = makeSignal({ call: "STRONG_BUY", conviction: 0.75, timestamp: T0 + store.MIN_REPOST_INTERVAL_MS });
+      expect(store.hasSignalChanged(prev, next)).toBe(true);
+    });
+
+    it("posts a large conviction move once the cooldown has passed", () => {
+      const prev = makeSignal({ call: "BUY", conviction: 0.4, timestamp: at(0) });
+      const early = makeSignal({ call: "BUY", conviction: 0.6, timestamp: at(30) });
+      const late = makeSignal({ call: "BUY", conviction: 0.6, timestamp: T0 + HOUR });
+      expect(store.hasSignalChanged(prev, early)).toBe(false);
+      expect(store.hasSignalChanged(prev, late)).toBe(true);
+    });
+
+    it("reports an actionable call dropping to HOLD, after the cooldown", () => {
+      const prev = makeSignal({ call: "BUY", conviction: 0.4, timestamp: at(0) });
+      expect(store.hasSignalChanged(prev, makeSignal({ call: "HOLD", conviction: 0.2, timestamp: at(10) }))).toBe(false);
+      expect(store.hasSignalChanged(prev, makeSignal({ call: "HOLD", conviction: 0.2, timestamp: T0 + HOUR }))).toBe(true);
+    });
+
+    it("reports HOLD becoming actionable, after the cooldown", () => {
+      const prev = makeSignal({ call: "HOLD", conviction: 0.2, timestamp: at(0) });
+      const next = makeSignal({ call: "BUY", conviction: 0.35, timestamp: T0 + HOUR });
+      expect(store.hasSignalChanged(prev, next)).toBe(true);
+    });
+  });
+
+  describe("direction flips bypass the cooldown", () => {
+    it("posts BUY -> SELL immediately", () => {
+      const prev = makeSignal({ call: "BUY", conviction: 0.5, timestamp: at(0) });
+      const next = makeSignal({ call: "SELL", conviction: 0.4, timestamp: at(3) });
+      expect(store.hasSignalChanged(prev, next)).toBe(true);
+    });
+
+    it("posts STRONG_SELL -> STRONG_BUY immediately", () => {
+      const prev = makeSignal({ call: "STRONG_SELL", conviction: 0.8, timestamp: at(0) });
+      const next = makeSignal({ call: "STRONG_BUY", conviction: 0.8, timestamp: at(1) });
+      expect(store.hasSignalChanged(prev, next)).toBe(true);
+    });
   });
 });
 

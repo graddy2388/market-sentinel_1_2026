@@ -9,6 +9,8 @@ import {
   setActiveSymbols,
 } from "../../ai/memory.js";
 import { runToolConversation } from "../../ai/tool-loop.js";
+import { getRecentSignals } from "../../signals/store.js";
+import { MIN_REWARD_RISK, formatLevel, type GradedSignal } from "../../signals/scorer.js";
 
 /** A chat response — text content with an optional chart image. */
 export interface ChatResponse {
@@ -115,12 +117,56 @@ export function detectQuestionDepth(text: string): QuestionDepth {
 // Prompt assembly
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Recent signal posts
+//
+// The signal engine posts embeds to the channel, but those never enter chat
+// memory — so "why is the entry and target the same?" got "which signal?"
+// back, from the bot that had just posted it. The last day's posts ride along
+// in the system prompt so questions about them resolve without a ticker.
+// ---------------------------------------------------------------------------
+
+const RECENT_SIGNAL_WINDOW_MS = 24 * 3_600_000;
+const RECENT_SIGNAL_LIMIT = 5;
+
+function formatAgo(timestamp: number, now = Date.now()): string {
+  const minutes = Math.max(0, Math.round((now - timestamp) / 60_000));
+  if (minutes < 60) return `${minutes} min ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
+export function describeRecentSignals(signals: GradedSignal[], now = Date.now()): string[] {
+  if (signals.length === 0) return [];
+  return [
+    "",
+    "Signals the automated signal engine recently posted to the channel, newest first. " +
+      "Users may ask about these without naming the asset (\"why is the target so close?\"):",
+    ...signals.map((s) => {
+      const levels =
+        s.call === "HOLD"
+          ? "no levels (HOLD)"
+          : `entry ${formatLevel(s.entry)}, stop ${formatLevel(s.stop)}, target ${formatLevel(s.target)}`;
+      return `- ${s.symbol} ${s.call.replace("_", " ")} @ ${Math.round(s.conviction * 100)}%, ` +
+        `${formatAgo(s.timestamp, now)}: price ${formatLevel(s.price)}, ${levels}. ${s.rationale}`;
+    }),
+    "How levels are set: entry is the price when the signal fired. The stop sits at the " +
+      "AI council's support (resistance for shorts) or 1.5x ATR away; the target at council " +
+      `resistance (support for shorts) or 3x ATR away, and must pay at least ${MIN_REWARD_RISK}:1 ` +
+      "against the stop. Signals posted before that rule existed may not meet it — say so plainly " +
+      "if one doesn't.",
+  ];
+}
+
 /**
- * Build the per-message system prompt: base rules, a depth hint, and the
+ * Build the per-message system prompt: base rules, a depth hint, the
  * conversation's active symbols so bare follow-ups ("yes pull current") have
- * something concrete to resolve against.
+ * something concrete to resolve against, and the channel's recent signal posts.
  */
-function buildSystemPrompt(activeSymbols: string[], depth: QuestionDepth): string {
+function buildSystemPrompt(
+  activeSymbols: string[],
+  depth: QuestionDepth,
+  recentSignals: GradedSignal[] = []
+): string {
   const parts = [BASE_SYSTEM_PROMPT];
 
   if (activeSymbols.length > 0) {
@@ -130,6 +176,8 @@ function buildSystemPrompt(activeSymbols: string[], depth: QuestionDepth): strin
         "If the user's message doesn't name an asset, assume they mean these."
     );
   }
+
+  parts.push(...describeRecentSignals(recentSignals));
 
   parts.push(
     "",
@@ -229,9 +277,14 @@ export async function handleChatMessage(
     const history = sessionId
       ? getHistory(sessionId).map((t) => ({ role: t.role, content: t.content }))
       : [];
+    // Context, not a requirement — a DB hiccup must not take chat down with it.
+    const recentSignals = await getRecentSignals(
+      Date.now() - RECENT_SIGNAL_WINDOW_MS,
+      RECENT_SIGNAL_LIMIT
+    ).catch(() => [] as GradedSignal[]);
 
     const result = await runToolConversation({
-      system: buildSystemPrompt(activeSymbols, detectQuestionDepth(trimmed)),
+      system: buildSystemPrompt(activeSymbols, detectQuestionDepth(trimmed), recentSignals),
       history,
       userMessage: trimmed,
     });

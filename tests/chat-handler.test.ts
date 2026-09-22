@@ -20,6 +20,14 @@ vi.mock("../src/config.js", () => ({
   hasOpenAI: () => true,
   hasAnyAI: () => true,
 }));
+let recentSignals: unknown[] = [];
+let recentSignalsFail = false;
+vi.mock("../src/signals/store.js", () => ({
+  getRecentSignals: vi.fn(async () => {
+    if (recentSignalsFail) throw new Error("db locked");
+    return recentSignals;
+  }),
+}));
 vi.mock("../src/ai/claude.js", () => ({ chatWithClaudeVision: vi.fn() }));
 vi.mock("../src/ai/openai.js", () => ({ chatWithOpenAIVision: vi.fn() }));
 
@@ -36,6 +44,8 @@ beforeEach(() => {
   runToolConversationMock.mockReset();
   runToolConversationMock.mockResolvedValue(reply("ok"));
   clearAllSessions();
+  recentSignals = [];
+  recentSignalsFail = false;
 });
 
 describe("conversation memory", () => {
@@ -182,5 +192,48 @@ describe("depth hint", () => {
 
     const call = runToolConversationMock.mock.calls[0][0];
     expect(call.system).toContain("get_market_data");
+  });
+});
+
+describe("the bot can see the signals it posted", () => {
+  // Two people asked "why is the entry and target the same?" about a post the
+  // bot had just made, and it replied "which signal?" both times.
+  const xrpPost = {
+    symbol: "XRP", call: "STRONG_BUY", conviction: 0.81, price: 1.5781,
+    entry: 1.5781, stop: 1.53, target: 1.5802,
+    rationale: "STRONG BUY @ 81% conviction. Technicals bullish (100%) AI council bullish (62% avg conf) — in agreement.",
+    components: { technical: "bullish", ai: "bullish", agreement: true },
+    timestamp: Date.now() - 17 * 60_000,
+  };
+
+  it("puts recent posts, with precise levels, into the system prompt", async () => {
+    recentSignals = [xrpPost];
+
+    await handleChatMessage("why is the entry and target the same", "chan-1");
+
+    const { system } = runToolConversationMock.mock.calls[0][0];
+    expect(system).toContain("XRP STRONG BUY @ 81%");
+    expect(system).toContain("17 min ago");
+    // Four decimals: a target $0.002 above entry is visible, not rounded to "same".
+    expect(system).toContain("entry $1.5781");
+    expect(system).toContain("target $1.5802");
+    // And it knows the rule, so it can say that post didn't meet it.
+    expect(system).toContain("1.5:1");
+  });
+
+  it("omits the section when nothing was posted", async () => {
+    await handleChatMessage("hi", "chan-1");
+
+    const { system } = runToolConversationMock.mock.calls[0][0];
+    expect(system).not.toContain("recently posted");
+  });
+
+  it("still answers when the signal lookup fails", async () => {
+    recentSignalsFail = true;
+    runToolConversationMock.mockResolvedValue(reply("still here"));
+
+    const [response] = await handleChatMessage("hi", "chan-1");
+
+    expect(response.content).toBe("still here");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { scoreSignal } from "../src/signals/scorer.js";
+import { scoreSignal, deriveLevels, MIN_REWARD_RISK } from "../src/signals/scorer.js";
 import type { TechnicalSummary, SignalDirection } from "../src/analysis/types.js";
 import type { CouncilAnalysisResult, ModelVote } from "../src/ai/types.js";
 
@@ -210,5 +210,84 @@ describe("scoreSignal", () => {
     const council = makeCouncil([makeVote("OpenAI", "bullish", 1)], "bullish", 1);
     const signal = scoreSignal(tech, council);
     expect(signal.conviction).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("deriveLevels — a target must be worth the risk", () => {
+  // The 9:14 AM XRP post: price $1.5781, council support ~$1.53, council
+  // resistance ~$1.5802. It printed entry $1.58, target $1.58.
+  const XRP = { price: 1.5781, atr: 0.012, support: 1.53, resistance: 1.5802 };
+
+  it("rejects a resistance sitting right on price instead of targeting it", () => {
+    const { entry, stop, target, notes } = deriveLevels(XRP.price, true, XRP.atr, {
+      support: XRP.support,
+      resistance: XRP.resistance,
+    });
+
+    const risk = entry - stop;
+    expect(stop).toBe(XRP.support);
+    expect(target).not.toBe(XRP.resistance);
+    expect(target - entry).toBeGreaterThanOrEqual(MIN_REWARD_RISK * risk - 1e-9);
+    // The rejected level is surfaced, not silently swapped.
+    expect(notes.join(" ")).toContain("resistance at $1.5802");
+  });
+
+  it("uses a resistance level that pays enough", () => {
+    const { target, notes } = deriveLevels(100, true, 2, { support: 97, resistance: 110 });
+    expect(target).toBe(110);
+    expect(notes).toHaveLength(0);
+  });
+
+  it("mirrors for shorts: support too close to target is rejected", () => {
+    const { entry, stop, target, notes } = deriveLevels(100, false, 2, { support: 99.9, resistance: 103 });
+    expect(stop).toBe(103);
+    expect(entry - target).toBeGreaterThanOrEqual(MIN_REWARD_RISK * (stop - entry) - 1e-9);
+    expect(notes.join(" ")).toContain("support at $99.90");
+  });
+
+  it("rejects a noise-tight support stop and falls back to ATR", () => {
+    // Default stop distance is 1.5 * ATR = 3; support 0.5 below price is too tight.
+    const { stop, notes } = deriveLevels(100, true, 2, { support: 99.5, resistance: null });
+    expect(stop).toBe(97);
+    expect(notes.join(" ")).toContain("too close for a stop");
+  });
+
+  it("keeps the minimum reward:risk even when a distant support widens the stop", () => {
+    // Stop at support 5 below price; plain 3x ATR target (6) would be only 1.2:1.
+    const { entry, stop, target } = deriveLevels(100, true, 2, { support: 95, resistance: null });
+    expect((target - entry) / (entry - stop)).toBeGreaterThanOrEqual(MIN_REWARD_RISK);
+  });
+
+  it("never produces a target on or behind entry, across many inputs", () => {
+    for (let i = 0; i < 500; i++) {
+      const price = 0.01 + Math.random() * 1000;
+      const isLong = Math.random() < 0.5;
+      const atr = Math.random() < 0.2 ? null : Math.random() * price * 0.05;
+      const jitter = () => price * (1 + (Math.random() - 0.5) * 0.2);
+      const { entry, stop, target } = deriveLevels(price, isLong, atr, {
+        support: Math.random() < 0.3 ? null : jitter(),
+        resistance: Math.random() < 0.3 ? null : jitter(),
+      });
+      const dir = isLong ? 1 : -1;
+      const risk = (entry - stop) * dir;
+      const reward = (target - entry) * dir;
+      expect(risk).toBeGreaterThan(0);
+      expect(reward).toBeGreaterThanOrEqual(MIN_REWARD_RISK * risk - 1e-9);
+    }
+  });
+
+  it("puts the rejected-level note in the signal rationale", () => {
+    // Technicals bullish 100% + council bullish 62% = 81% STRONG BUY, as posted.
+    const signal = scoreSignal(
+      makeTechnical("bullish", 1, { price: XRP.price, atr: XRP.atr }),
+      makeCouncil(
+        [makeVote("OpenAI", "bullish", 0.62, { support: XRP.support, resistance: XRP.resistance })],
+        "bullish",
+        0.62
+      )
+    );
+    expect(signal.call).toBe("STRONG_BUY");
+    expect(signal.rationale).toContain("too close to price");
+    expect(signal.target).toBeGreaterThan(signal.entry);
   });
 });
