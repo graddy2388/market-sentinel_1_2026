@@ -56,6 +56,15 @@ vi.mock("../src/signals/store.js", async (importOriginal) => {
 let watched = true;
 const isWatchedMock = vi.fn(async () => watched);
 let watchlistEntries: Array<{ symbol: string; market: string; addedAt: string }> = [];
+// Live watches: the only thing that makes a signal reach Discord, and they
+// also pull a symbol into the sweep even when it isn't on the watchlist.
+let activeWatches: Array<{ symbol: string; expiresAt: number | null }> = [];
+vi.mock("../src/state/watches.js", () => ({
+  isBeingWatched: vi.fn(async (sym: string) =>
+    activeWatches.some((w) => w.symbol === sym.toUpperCase())
+  ),
+  listActiveWatches: vi.fn(async () => activeWatches),
+}));
 vi.mock("../src/state/watchlist.js", () => ({
   isWatched: (...args: unknown[]) => isWatchedMock(...args),
   listWatchlist: vi.fn(async () => watchlistEntries),
@@ -104,6 +113,7 @@ beforeEach(() => {
   watched = true;
   fetchCandlesCachedMock.mockClear();
   watchlistEntries = [];
+  activeWatches = [];
   cryptoSources.clear();
 });
 
@@ -233,6 +243,24 @@ describe("runSweep — scores whatever is on the watchlist right now", () => {
 
   it("skips stocks — there are no candles to score them from yet", async () => {
     watchlistEntries = [entry("BTC"), entry("SPY", "stock")];
+
+    await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toEqual(["BTC"]);
+  });
+
+  it("scores a coin that is only under a watch, not on the watchlist", async () => {
+    watchlistEntries = [];
+    activeWatches = [{ symbol: "PEPE", expiresAt: Date.now() + 3_600_000 }];
+
+    await runSweep({ staggerMs: 0 });
+
+    expect(sweptSymbols()).toEqual(["PEPE"]);
+  });
+
+  it("doesn't score the same coin twice when it's both listed and watched", async () => {
+    watchlistEntries = [entry("BTC")];
+    activeWatches = [{ symbol: "BTC", expiresAt: null }];
 
     await runSweep({ staggerMs: 0 });
 

@@ -134,3 +134,42 @@ export const dialogueTranscripts = sqliteTable("dialogue_transcripts", {
   confidenceBefore: real("confidence_before"),
   confidenceAfter: real("confidence_after"),
 });
+
+// ---------------------------------------------------------------------------
+// On-demand watches
+//
+// A watch is explicit, time-boxed permission to interrupt: live signal pings
+// happen only for symbols being watched, and only until the watch expires.
+// The watchlist keeps its own job (daily briefing, context) and no longer
+// means "ping me forever" — signals decay within the hour, so an unsolicited
+// 3am post is a stale call by the time it's read.
+// ---------------------------------------------------------------------------
+
+export const watches = sqliteTable("watches", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  symbol: text("symbol").notNull(),
+  /** Null means indefinite — it runs until stopped. */
+  expiresAt: text("expires_at"),
+  /** Set when stopped early; an active watch has neither this nor a past expiry. */
+  stoppedAt: text("stopped_at"),
+  createdBy: text("created_by"),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+/**
+ * Notifications withheld during quiet hours, delivered in the next briefing.
+ * Held rather than dropped: you should still learn what happened overnight,
+ * just not be woken for a call that expires before you see it.
+ */
+export const heldNotices = sqliteTable("held_notices", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind", { enum: ["signal", "proposal", "watch_expired"] }).notNull(),
+  symbol: text("symbol").notNull(),
+  summary: text("summary").notNull(),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  deliveredAt: text("delivered_at"),
+});

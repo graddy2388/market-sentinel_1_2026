@@ -26,6 +26,11 @@ const configSchema = z.object({
   ALERT_COOLDOWN_MINUTES: z.coerce.number().default(15),
   BRIEFING_HOUR: z.coerce.number().min(0).max(23).default(8),
   BRIEFING_TZ_OFFSET: z.coerce.number().min(-12).max(14).default(-4),
+  // Local hours (same offset as the briefing) during which nothing is pushed.
+  // Anything that fires is held and folded into the next briefing. Set both to
+  // the same value to disable.
+  QUIET_HOURS_START: z.coerce.number().min(0).max(23).default(0),
+  QUIET_HOURS_END: z.coerce.number().min(0).max(23).default(8),
   // Web dashboard access token. When unset, the dashboard is disabled entirely
   // (routes 404) so it can never be exposed unauthenticated. Min length guards
   // against trivially guessable tokens.

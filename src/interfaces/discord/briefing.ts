@@ -6,6 +6,8 @@ import { analyzeTechnicals } from "../../analysis/signals.js";
 import { renderChart } from "../../charts/renderer.js";
 import { getDb, saveDb } from "../../state/db.js";
 import { watchlist, alerts, positions, settings } from "../../state/schema.js";
+import { takeHeldNotices, type HeldNotice } from "../../notifications/gate.js";
+import { listActiveWatches } from "../../state/watches.js";
 import type { MarketOverview } from "../../data/types.js";
 import type { TechnicalSummary, SignalDirection } from "../../analysis/types.js";
 
@@ -138,14 +140,36 @@ async function getPositionSummaries(): Promise<PositionSummary[]> {
   }
 }
 
+/**
+ * What was withheld overnight. Quiet hours hold pings rather than dropping
+ * them, so the morning briefing is where they land — a signal that fired at
+ * 3am is long stale as a trade, but still worth knowing happened.
+ */
+function overnightField(notices: HeldNotice[]): { name: string; value: string; inline: boolean } | null {
+  if (notices.length === 0) return null;
+
+  const lines = notices.slice(0, 10).map((n) => {
+    const localTime = new Date(n.createdAt + BRIEFING_TZ_OFFSET * 3_600_000).toISOString().slice(11, 16);
+    return `${localTime} — **${n.symbol}** ${n.summary}`;
+  });
+  if (notices.length > lines.length) {
+    lines.push(`…and ${notices.length - lines.length} more`);
+  }
+  lines.push("_Held overnight, so treat these levels as stale._");
+
+  return { name: `While you were away (${notices.length})`, value: lines.join("\n"), inline: false };
+}
+
 export async function generateBriefing(): Promise<{
   embeds: EmbedBuilder[];
   files: { attachment: Buffer; name: string }[];
 }> {
   const symbols = await getWatchlistSymbols();
-  const [alertCount, positionSummaries] = await Promise.all([
+  const [alertCount, positionSummaries, heldNotices, activeWatches] = await Promise.all([
     getActiveAlertCount(),
     getPositionSummaries(),
+    takeHeldNotices(),
+    listActiveWatches(),
   ]);
 
   // Fetch data for all watchlist symbols in parallel
@@ -177,6 +201,23 @@ export async function generateBriefing(): Promise<{
       return `**${b.symbol}** ${formatUsd(b.overview.price)} ${arrow} ${formatPct(b.overview.changePercent24h)}${techInfo}`;
     });
     mainEmbed.addFields({ name: "Watchlist", value: overviewLines.join("\n"), inline: false });
+  }
+
+  // Anything quiet hours withheld, and what is still being watched.
+  const held = overnightField(heldNotices);
+  if (held) mainEmbed.addFields(held);
+
+  if (activeWatches.length > 0) {
+    mainEmbed.addFields({
+      name: "Watching now",
+      value: activeWatches
+        .map((w) => {
+          const until = w.expiresAt ? `until <t:${Math.floor(w.expiresAt / 1000)}:t>` : "until stopped";
+          return `**${w.symbol}** — ${until}`;
+        })
+        .join("\n"),
+      inline: false,
+    });
   }
 
   // Top mover highlight

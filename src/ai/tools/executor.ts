@@ -25,6 +25,8 @@ import {
   listWatchlist,
 } from "../../state/watchlist.js";
 import { researchSymbol, describeSource } from "../../agents/research/agent.js";
+import { startWatch, stopWatch, listActiveWatches, DEFAULT_WATCH_MINUTES } from "../../state/watches.js";
+import { countHeldNotices, isQuietHour } from "../../notifications/gate.js";
 import { proposeTrade } from "../../agents/orchestrator.js";
 import { listDecisionRecords } from "../../state/proposals.js";
 import type { DecisionRecord, ProposalStatus } from "../../agents/types.js";
@@ -432,7 +434,96 @@ async function listProposals(input: Record<string, unknown>): Promise<ToolResult
   };
 }
 
+// ---------------------------------------------------------------------------
+// Watches — the only thing that makes the bot push signal alerts
+// ---------------------------------------------------------------------------
+
+/** A week. Longer than this, use an indefinite watch deliberately. */
+const MAX_WATCH_MINUTES = 7 * 24 * 60;
+const MIN_WATCH_MINUTES = 5;
+
+function describeExpiry(expiresAt: number | null, now = Date.now()): string {
+  if (expiresAt === null) return "runs until you stop it";
+  const minutes = Math.max(1, Math.round((expiresAt - now) / 60_000));
+  if (minutes < 60) return `expires in ${minutes} min`;
+  const hours = Math.round((minutes / 60) * 10) / 10;
+  return `expires in ${hours}h (${new Date(expiresAt).toISOString()})`;
+}
+
+async function manageWatches(input: Record<string, unknown>): Promise<ToolResult> {
+  const action = String(input.action ?? "").toLowerCase();
+
+  if (action === "list") {
+    const active = await listActiveWatches();
+    return {
+      text: JSON.stringify({
+        count: active.length,
+        quietHoursNow: isQuietHour(),
+        heldForBriefing: await countHeldNotices(),
+        watches: active.map((w) => ({
+          symbol: w.symbol,
+          expiresAt: w.expiresAt ? new Date(w.expiresAt).toISOString() : null,
+          detail: describeExpiry(w.expiresAt),
+        })),
+        note:
+          active.length === 0
+            ? "Nothing is being watched, so no signal alerts will be pushed. Signals are still recorded and can be asked about."
+            : undefined,
+      }),
+    };
+  }
+
+  const sym = parseSymbol(input.symbol);
+  if ("error" in sym) return fail(`${sym.error} (required for ${action})`);
+
+  if (action === "start") {
+    let durationMinutes: number | null = DEFAULT_WATCH_MINUTES;
+    if (input.durationMinutes !== undefined && input.durationMinutes !== null) {
+      const requested = Number(input.durationMinutes);
+      if (!Number.isFinite(requested)) return fail("durationMinutes must be a number, or 0 for indefinite.");
+      // 0 means "until I stop it".
+      durationMinutes =
+        requested === 0
+          ? null
+          : Math.min(Math.max(Math.round(requested), MIN_WATCH_MINUTES), MAX_WATCH_MINUTES);
+    }
+
+    const watch = await startWatch(sym.symbol, { durationMinutes });
+    return {
+      text: JSON.stringify({
+        action: "start",
+        symbol: watch.symbol,
+        expiresAt: watch.expiresAt ? new Date(watch.expiresAt).toISOString() : null,
+        extendedExisting: watch.replaced,
+        quietHoursNow: isQuietHour(),
+        note:
+          `Watching ${watch.symbol}; it ${describeExpiry(watch.expiresAt)}. ` +
+          "Signal changes will be posted while it runs, except during quiet hours " +
+          "(those are held for the morning briefing).",
+      }),
+      artifacts: { symbol: watch.symbol },
+    };
+  }
+
+  if (action === "stop") {
+    const stopped = await stopWatch(sym.symbol);
+    return {
+      text: JSON.stringify({
+        action: "stop",
+        symbol: sym.symbol,
+        stopped,
+        note: stopped
+          ? `No more alerts for ${sym.symbol}. It stays on the watchlist (if it was there) for the daily briefing.`
+          : `${sym.symbol} was not being watched — nothing to stop.`,
+      }),
+    };
+  }
+
+  return fail(`Unknown watch action "${action}". Use list, start, or stop.`);
+}
+
 const HANDLERS: Record<string, ToolHandler> = {
+  manage_watches: manageWatches,
   get_market_data: getMarketData,
   research_asset: researchAsset,
   evaluate_trade: evaluateTrade,

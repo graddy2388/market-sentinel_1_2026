@@ -12,6 +12,8 @@ import { DataManager } from "../../data/manager.js";
 import { startSignalMonitor, stopSignalMonitor } from "../../signals/monitor.js";
 import { bus } from "../../events/bus.js";
 import { onProviderAlert } from "../../ai/health.js";
+import { deliver } from "../../notifications/gate.js";
+import { collectExpiredWatches } from "../../state/watches.js";
 import { proposeTrade } from "../../agents/orchestrator.js";
 import { actionFor } from "../../agents/consensus.js";
 import { handleDashboardRequest } from "../web/dashboard.js";
@@ -594,7 +596,7 @@ async function startHttp() {
     // Start Discord bot + alert engine if configured
     if (hasDiscord()) {
       try {
-        const { startDiscordBot, sendAlertNotification, sendSignalNotification, sendProviderAlert } =
+        const { startDiscordBot, sendAlertNotification, sendSignalNotification, sendProviderAlert, sendNotice } =
           await import("../discord/bot.js");
         const { startAlertEngine } = await import("../../alerts/engine.js");
 
@@ -604,12 +606,35 @@ async function startHttp() {
             console.error("[Market Sentinel] Alert notification error:", err)
           );
         });
-        // Push graded-signal changes to Discord.
+        // Graded-signal changes reach Discord only for symbols being watched,
+        // and only outside quiet hours — otherwise they're held for the briefing.
         bus.onSignal((signal) => {
-          sendSignalNotification(signal).catch((err) =>
-            console.error("[Market Sentinel] Signal notification error:", err)
-          );
+          const summary =
+            `${signal.call.replace("_", " ")} @ ${Math.round(signal.conviction * 100)}% conviction`;
+          void deliver("signal", signal.symbol, summary, () => sendSignalNotification(signal));
         });
+
+        // Tell the channel when a watch runs out, so silence isn't ambiguous.
+        const expiryCheck = setInterval(() => {
+          void (async () => {
+            try {
+              for (const watch of await collectExpiredWatches()) {
+                await deliver(
+                  "watch_expired",
+                  watch.symbol,
+                  `Watch on ${watch.symbol} expired — no more live pings for it.`,
+                  () => sendNotice(`⏱️ Watch on **${watch.symbol}** expired. Say "watch ${watch.symbol}" to start again.`),
+                  // The watch just ended, so the usual "is it watched?" check
+                  // would drop this. Quiet hours still apply.
+                  { requireWatch: false }
+                );
+              }
+            } catch (err) {
+              console.error("[Market Sentinel] Watch expiry check failed:", err);
+            }
+          })();
+        }, 5 * 60_000);
+        expiryCheck.unref();
         // Tell the operator when an AI provider breaks or recovers.
         onProviderAlert((alert) => {
           sendProviderAlert(alert).catch((err) =>
@@ -631,7 +656,10 @@ async function startHttp() {
       bus.onSignal((signal) => {
         if (!actionFor(signal.call)) return;
         proposeTrade(signal.symbol, "signal")
-          .then((record) => (record.status === "eligible" && announce ? announce(record) : undefined))
+          .then((record) => {
+            if (record.status !== "eligible" || !announce) return undefined;
+            return deliver("proposal", record.symbol, record.summary, () => announce(record));
+          })
           .catch((err) => console.error("[Market Sentinel] Proposal pipeline error:", err));
       });
     }

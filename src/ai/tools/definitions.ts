@@ -97,9 +97,27 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
   },
   {
+    name: "manage_watches",
+    description:
+      "Start, stop, or list live watches. A watch is the ONLY thing that makes the bot push signal alerts for a symbol — \"watch XRP\", \"keep an eye on BTC for an hour\", \"alert me on VVV until I say stop\", \"stop watching XRP\", \"what are you watching?\". Watches expire on their own (4 hours by default) so nothing pings forever, and nothing is pushed during quiet hours (roughly midnight to 8am local) — anything that fires then appears in the morning briefing instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "start", "stop"], description: "What to do." },
+        symbol: { type: "string", description: "Ticker symbol. Required for start and stop." },
+        durationMinutes: {
+          type: "number",
+          description:
+            "How long to watch. Omit for the default 4 hours. Use 0 for indefinite — it then runs until stopped.",
+        },
+      },
+      required: ["action"],
+    },
+  },
+  {
     name: "manage_watchlist",
     description:
-      "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and the automated signal posts (the 'X — BUY/SELL/HOLD' embeds), so 'add X to my daily briefing' means add, and 'stop the X alerts/signals' means remove. Changes take effect on the next signal sweep, within about 5 minutes. Adding is idempotent.",
+      "List, add to, or remove from the user's watchlist. The watchlist drives the daily briefing and keeps a symbol scored in the background — it does NOT cause alerts on its own. To be pinged about a symbol, start a watch with manage_watches; 'alert me about X' or 'stop the X alerts' is manage_watches, not this. Adding is idempotent.",
     parameters: {
       type: "object",
       properties: {
@@ -119,7 +137,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: "manage_alerts",
     description:
-      "List active price alerts, or create a new one. Alerts fire once when their condition is met and are then deactivated. These are user-set price/RSI triggers only — the automated signal posts are controlled by the watchlist (manage_watchlist), not here.",
+      "List active price alerts, or create a new one. Alerts fire once when their condition is met and are then deactivated. These are user-set price/RSI triggers for a specific level. Being pinged about signals is a watch (manage_watches), not this.",
     parameters: {
       type: "object",
       properties: {

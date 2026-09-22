@@ -61,6 +61,8 @@ vi.mock("../src/config.js", () => ({
   // db.ts reads DB_PATH from config; point it at the throwaway database so
   // these tests never touch the real ~/.market-sentinel data.
   DB_PATH: TEST_DB_PATH,
+  // The watch tool reports whether it's currently quiet hours.
+  appConfig: { QUIET_HOURS_START: 0, QUIET_HOURS_END: 8, BRIEFING_TZ_OFFSET: -4 },
 }));
 
 let executor: typeof import("../src/ai/tools/executor.js");
@@ -273,5 +275,71 @@ describe("list_proposals", () => {
       (await executor.executeTool("list_proposals", { status: "approved_by_ceo", limit: 9999 })).text
     );
     expect(result.count).toBeLessThanOrEqual(20);
+  });
+});
+
+describe("manage_watches", () => {
+  // A watch is the only thing that makes the bot push signal alerts, so the
+  // defaults matter: it expires on its own unless you deliberately say otherwise.
+  beforeEach(async () => {
+    const { listActiveWatches, stopWatch } = await import("../src/state/watches.js");
+    for (const w of await listActiveWatches()) await stopWatch(w.symbol);
+  });
+
+  it("defaults to a four-hour watch that expires by itself", async () => {
+    const before = Date.now();
+    const body = JSON.parse(
+      (await executor.executeTool("manage_watches", { action: "start", symbol: "xrp" })).text
+    );
+
+    expect(body.symbol).toBe("XRP");
+    const expiresIn = Date.parse(body.expiresAt) - before;
+    expect(expiresIn).toBeGreaterThan(3.9 * 3_600_000);
+    expect(expiresIn).toBeLessThan(4.1 * 3_600_000);
+  });
+
+  it("treats 0 as indefinite", async () => {
+    const body = JSON.parse(
+      (await executor.executeTool("manage_watches", { action: "start", symbol: "BTC", durationMinutes: 0 })).text
+    );
+
+    expect(body.expiresAt).toBeNull();
+    expect(body.note).toContain("until you stop it");
+  });
+
+  it("clamps an absurd duration instead of trusting the model", async () => {
+    const body = JSON.parse(
+      (await executor.executeTool("manage_watches", { action: "start", symbol: "ETH", durationMinutes: 999999 })).text
+    );
+
+    const days = (Date.parse(body.expiresAt) - Date.now()) / 86_400_000;
+    expect(days).toBeLessThanOrEqual(7.01);
+  });
+
+  it("lists what is being watched, and says plainly when nothing is", async () => {
+    const empty = JSON.parse((await executor.executeTool("manage_watches", { action: "list" })).text);
+    expect(empty.count).toBe(0);
+    expect(empty.note).toContain("no signal alerts will be pushed");
+
+    await executor.executeTool("manage_watches", { action: "start", symbol: "SOL", durationMinutes: 60 });
+    const listed = JSON.parse((await executor.executeTool("manage_watches", { action: "list" })).text);
+    expect(listed.count).toBe(1);
+    expect(listed.watches[0]).toMatchObject({ symbol: "SOL" });
+  });
+
+  it("stops a watch, and says so when there was nothing to stop", async () => {
+    await executor.executeTool("manage_watches", { action: "start", symbol: "ADA", durationMinutes: 60 });
+
+    const stopped = JSON.parse((await executor.executeTool("manage_watches", { action: "stop", symbol: "ADA" })).text);
+    expect(stopped.stopped).toBe(true);
+
+    const again = JSON.parse((await executor.executeTool("manage_watches", { action: "stop", symbol: "ADA" })).text);
+    expect(again.stopped).toBe(false);
+    expect(again.note).toContain("was not being watched");
+  });
+
+  it("validates the symbol and the action", async () => {
+    expect((await executor.executeTool("manage_watches", { action: "start", symbol: "" })).text).toContain("ERROR");
+    expect((await executor.executeTool("manage_watches", { action: "frobnicate", symbol: "BTC" })).text).toContain("ERROR");
   });
 });

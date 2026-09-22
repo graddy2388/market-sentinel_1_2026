@@ -215,6 +215,20 @@ export async function sendShadowProposal(record: DecisionRecord): Promise<void> 
   }
 }
 
+/** A one-line message to the alert channel (watch expiry and similar). */
+export async function sendNotice(text: string): Promise<void> {
+  if (!client || !alertChannelId) return;
+
+  try {
+    const channel = await client.channels.fetch(alertChannelId);
+    if (channel && channel.isTextBased() && "send" in channel) {
+      await (channel as TextChannel).send(text);
+    }
+  } catch (err) {
+    console.error("[Discord] Failed to send notice:", err);
+  }
+}
+
 export async function sendSignalNotification(signal: GradedSignal): Promise<void> {
   // Silently no-op if Discord isn't configured (mirrors sendAlertNotification).
   if (!client || !alertChannelId) return;

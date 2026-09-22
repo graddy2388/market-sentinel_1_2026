@@ -127,6 +127,28 @@ CREATE TABLE IF NOT EXISTS dialogue_transcripts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dialogue_proposal ON dialogue_transcripts(proposal_id);
+
+CREATE TABLE IF NOT EXISTS watches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL,
+  expires_at TEXT,
+  stopped_at TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_watches_symbol ON watches(symbol);
+
+CREATE TABLE IF NOT EXISTS held_notices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK(kind IN ('signal', 'proposal', 'watch_expired')),
+  symbol TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_held_notices_undelivered ON held_notices(delivered_at, created_at);
 `;
 
 export async function getDb() {

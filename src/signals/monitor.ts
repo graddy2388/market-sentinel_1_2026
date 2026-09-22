@@ -34,6 +34,7 @@ import { hasAnyAI } from "../config.js";
 import { scoreSignal } from "./scorer.js";
 import { getLatestSignal, insertSignal, hasSignalChanged } from "./store.js";
 import { isWatched, listWatchlist } from "../state/watchlist.js";
+import { isBeingWatched, listActiveWatches } from "../state/watches.js";
 import { bus } from "../events/bus.js";
 import type { CouncilAnalysisResult } from "../ai/types.js";
 import type { TechnicalSummary } from "../analysis/types.js";
@@ -141,9 +142,10 @@ export async function evaluateSymbol(symbol: string): Promise<GradedSignal | nul
   inFlight.add(sym);
 
   try {
-    // Checked before any work, so removing a coin from the watchlist takes
-    // effect on the next sweep — and skips the council spend.
-    if (!(await isWatched(sym))) return null;
+    // Checked before any work, so removing a coin takes effect on the next
+    // sweep — and skips the council spend. An active watch counts too, so you
+    // can watch something that isn't on the briefing list.
+    if (!(await isWatched(sym)) && !(await isBeingWatched(sym))) return null;
 
     const assessment = await assessSymbol(sym);
     if (!assessment) return null;
@@ -183,9 +185,13 @@ export async function runSweep(
   const staggerMs = opts.staggerMs ?? SWEEP_STAGGER_MS;
 
   try {
-    const symbols = (await listWatchlist())
+    // Watchlist coins (for the briefing and decision records) plus anything
+    // under an active watch, which may not be on the list at all.
+    const listed = (await listWatchlist())
       .filter((entry) => entry.market === "crypto")
-      .map((entry) => entry.symbol);
+      .map((entry) => entry.symbol.toUpperCase());
+    const watched = (await listActiveWatches()).map((w) => w.symbol);
+    const symbols = [...new Set([...listed, ...watched])];
 
     const pushed: GradedSignal[] = [];
     for (let i = 0; i < symbols.length; i++) {
