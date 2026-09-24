@@ -19,7 +19,8 @@ import { actionFor } from "../../agents/consensus.js";
 import { handleDashboardRequest } from "../web/dashboard.js";
 import { analyzeTechnicals } from "../../analysis/signals.js";
 import { councilAnalyze, councilCritique } from "../../ai/council.js";
-import { hasAnyAI, hasDiscord, hasDashboard } from "../../config.js";
+import { hasAnyAI, hasDiscord, hasDashboard, hasMcpAuth } from "../../config.js";
+import { isMcpAuthorized } from "./auth.js";
 import { getDb, saveDb, closeDb } from "../../state/db.js";
 import { watchlist, positions, alerts } from "../../state/schema.js";
 import { eq } from "drizzle-orm";
@@ -442,6 +443,23 @@ async function startHttp() {
   sessionCleanup.unref();
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // Everything below runs inside this guard: an async handler that throws
+    // rejects with nothing to catch it, and Node then kills the process. A
+    // malformed cookie header was enough to do that, before any auth check.
+    try {
+      await handleHttpRequest(req, res);
+    } catch (err) {
+      console.error("[HTTP] Unhandled request error:", err instanceof Error ? err.message : err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      } else {
+        res.end();
+      }
+    }
+  });
+
+  async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", `http://localhost:${MCP_PORT}`);
 
     // --- Security headers on all responses ---
@@ -472,6 +490,26 @@ async function startHttp() {
 
     // --- MCP endpoint ---
     if (url.pathname === "/mcp") {
+      if (!isMcpAuthorized(req.headers.authorization, req.socket.remoteAddress)) {
+        res.writeHead(401, {
+          "Content-Type": "application/json",
+          "WWW-Authenticate": 'Bearer realm="market-sentinel"',
+        });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: {
+              code: -32001,
+              message: hasMcpAuth()
+                ? "Unauthorized: send Authorization: Bearer <MCP_AUTH_TOKEN>"
+                : "Unauthorized: remote access is disabled until MCP_AUTH_TOKEN is set",
+            },
+            id: null,
+          })
+        );
+        return;
+      }
+
       const method = req.method?.toUpperCase();
 
       if (method === "POST") {
@@ -581,12 +619,20 @@ async function startHttp() {
     // --- 404 ---
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
-  });
+  }
 
   const MCP_HOST = process.env.MCP_HOST || "127.0.0.1";
   httpServer.listen(MCP_PORT, MCP_HOST, async () => {
     console.log(`[Market Sentinel] MCP StreamableHTTP server listening on http://${MCP_HOST}:${MCP_PORT}/mcp`);
     console.log(`[Market Sentinel] Health check: http://${MCP_HOST}:${MCP_PORT}/health`);
+    if (hasMcpAuth()) {
+      console.log("[Market Sentinel] MCP requires Authorization: Bearer <MCP_AUTH_TOKEN>");
+    } else {
+      console.warn(
+        `[Market Sentinel] MCP_AUTH_TOKEN is not set — /mcp accepts loopback only. ` +
+          `Set it to use MCP from another machine; it guards portfolio reads, database writes, and model spend.`
+      );
+    }
     if (hasDashboard()) {
       console.log(`[Market Sentinel] Dashboard: http://${MCP_HOST}:${MCP_PORT}/dashboard?token=YOUR_TOKEN`);
     } else {

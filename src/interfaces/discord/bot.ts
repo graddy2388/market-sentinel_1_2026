@@ -5,7 +5,7 @@ import {
   type Message,
   type TextChannel,
 } from "discord.js";
-import { appConfig } from "../../config.js";
+import { appConfig, hasDiscordOwners, isDiscordOwner } from "../../config.js";
 import { commands, handlePrice, handleAnalyze, handleAlerts, handleHelp } from "./commands.js";
 import { alertEmbed, signalEmbed, providerAlertEmbed, shadowProposalEmbed } from "./embeds.js";
 import { handleChatMessage, handleImageMessage, type ChatResponse } from "./chat.js";
@@ -57,6 +57,14 @@ export async function startDiscordBot(): Promise<Client> {
 
   client.once(Events.ClientReady, async (c) => {
     console.log(`[Discord] Bot logged in as ${c.user.tag}`);
+    if (hasDiscordOwners()) {
+      console.log(`[Discord] Restricted to ${appConfig.DISCORD_OWNER_IDS.length} owner id(s)`);
+    } else {
+      console.warn(
+        "[Discord] DISCORD_OWNER_IDS is not set — anyone who can DM or mention this bot can read " +
+          "your positions, change the watchlist, and spend on model calls. Set it to your user id."
+      );
+    }
 
     // Register slash commands globally using the built-in ApplicationCommandManager
     try {
@@ -73,6 +81,18 @@ export async function startDiscordBot(): Promise<Client> {
 
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
+
+    // Same authorization as chat: /analyze fires the whole model council and
+    // /alerts reads the owner's alerts, so these aren't public either.
+    if (!isDiscordOwner(interaction.user.id)) {
+      console.warn(
+        `[Discord] Refused /${interaction.commandName} from ${interaction.user.id} (${interaction.user.tag}) — not in DISCORD_OWNER_IDS`
+      );
+      try {
+        await interaction.reply({ content: "Sorry — I only take instructions from my owner.", ephemeral: true });
+      } catch { /* interaction may have expired */ }
+      return;
+    }
 
     try {
       switch (interaction.commandName) {
@@ -119,6 +139,20 @@ export async function startDiscordBot(): Promise<Client> {
     if (!checkUserRateLimit(message.author.id)) {
       try {
         await message.reply("You're sending messages too fast. Please wait a moment before trying again.");
+      } catch { /* ignore */ }
+      return;
+    }
+
+    // Authorization. The chat tools read the owner's portfolio, change the
+    // watchlist and alerts, and spend real money on model calls — so anyone who
+    // can mention the bot or DM it could do all three. Checked after the rate
+    // limiter so refusals can't be used to spam the channel.
+    if (!isDiscordOwner(message.author.id)) {
+      console.warn(
+        `[Discord] Refused ${message.author.id} (${message.author.tag}) — not in DISCORD_OWNER_IDS`
+      );
+      try {
+        await message.reply("Sorry — I only take instructions from my owner.");
       } catch { /* ignore */ }
       return;
     }

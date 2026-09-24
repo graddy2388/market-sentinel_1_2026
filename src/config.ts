@@ -35,6 +35,17 @@ const configSchema = z.object({
   // (routes 404) so it can never be exposed unauthenticated. Min length guards
   // against trivially guessable tokens.
   DASHBOARD_TOKEN: z.string().min(16, "DASHBOARD_TOKEN must be at least 16 characters").optional(),
+  // Bearer token required on /mcp from anywhere but the container itself. The
+  // endpoint exposes portfolio reads, DB writes, and 7-model council calls, and
+  // the image listens on 0.0.0.0 — so without this, every device on the LAN
+  // has full access. Unset means loopback-only.
+  MCP_AUTH_TOKEN: z.string().min(16, "MCP_AUTH_TOKEN must be at least 16 characters").optional(),
+  // Discord user IDs allowed to use the bot. Unset means everyone who can see
+  // the bot, which includes reading the portfolio and spending on models.
+  DISCORD_OWNER_IDS: z
+    .string()
+    .default("")
+    .transform((s) => s.split(",").map((id) => id.trim()).filter(Boolean)),
 });
 
 const parsed = configSchema.safeParse(process.env);
@@ -100,6 +111,22 @@ export function hasAnyAI(): boolean {
 
 export function hasDiscord(): boolean {
   return !!appConfig.DISCORD_BOT_TOKEN;
+}
+
+/** Whether /mcp requires a bearer token (and is therefore reachable remotely). */
+export function hasMcpAuth(): boolean {
+  return !!appConfig.MCP_AUTH_TOKEN;
+}
+
+/** Whether the Discord bot is restricted to an owner allowlist. */
+export function hasDiscordOwners(): boolean {
+  return appConfig.DISCORD_OWNER_IDS.length > 0;
+}
+
+/** True when this Discord user may use the bot. Everyone is allowed if no allowlist is set. */
+export function isDiscordOwner(userId: string): boolean {
+  if (!hasDiscordOwners()) return true;
+  return appConfig.DISCORD_OWNER_IDS.includes(userId);
 }
 
 export function hasDashboard(): boolean {

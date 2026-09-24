@@ -14,7 +14,7 @@
  * declines every route, so they 404) — it can never be exposed unauthenticated.
  */
 import { readFile } from "fs/promises";
-import { join, dirname, extname } from "path";
+import { join, dirname, extname, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 import { timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
@@ -62,9 +62,25 @@ function parseCookies(header: string | undefined): Record<string, string> {
     if (idx === -1) continue;
     const k = part.slice(0, idx).trim();
     const v = part.slice(idx + 1).trim();
-    if (k) out[k] = decodeURIComponent(v);
+    if (!k) continue;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch {
+      // "ms_dash=%" is malformed percent-encoding. decodeURIComponent throws,
+      // and this runs before any auth check — so an unauthenticated request
+      // could take the process down with it. Keep the raw value instead.
+      out[k] = v;
+    }
   }
   return out;
+}
+
+/** True when the request reached us over TLS, directly or via a trusted proxy. */
+function isSecureRequest(req: IncomingMessage): boolean {
+  if ((req.socket as { encrypted?: boolean }).encrypted) return true;
+  const forwarded = req.headers["x-forwarded-proto"];
+  const proto = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return proto?.split(",")[0].trim().toLowerCase() === "https";
 }
 
 function isAuthed(req: IncomingMessage): boolean {
@@ -91,9 +107,11 @@ async function serveStatic(res: ServerResponse, fileName: string): Promise<void>
     return;
   }
 
-  const fullPath = join(WEB_DIR, fileName);
-  // Path-traversal guard: resolved path must stay inside WEB_DIR.
-  if (!fullPath.startsWith(WEB_DIR)) {
+  const fullPath = resolve(WEB_DIR, fileName);
+  // Path-traversal guard: the resolved path must stay inside WEB_DIR. Compared
+  // with a trailing separator, since a plain prefix test also accepts a sibling
+  // directory like "public-evil".
+  if (fullPath !== WEB_DIR && !fullPath.startsWith(WEB_DIR + sep)) {
     res.writeHead(403, { "Content-Type": "text/plain" });
     res.end("Forbidden");
     return;
@@ -263,8 +281,12 @@ export async function handleDashboardRequest(
   if (path === "/dashboard" && req.method === "GET") {
     const qsToken = url.searchParams.get("token");
     if (qsToken && validToken(qsToken)) {
+      // Secure only over TLS: setting it on plain HTTP (the LAN case) would stop
+      // the browser sending the cookie at all. Over HTTP the token crosses the
+      // network in clear text — see the deployment note in .env.example.
+      const secure = isSecureRequest(req) ? " Secure;" : "";
       res.writeHead(302, {
-        "Set-Cookie": `${COOKIE_NAME}=${encodeURIComponent(qsToken)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
+        "Set-Cookie": `${COOKIE_NAME}=${encodeURIComponent(qsToken)}; HttpOnly;${secure} SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
         Location: "/dashboard",
       });
       res.end();
